@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::HashSet;
 use thiserror::Error;
 
 const MAX_NAME_LEN: usize = 64;
@@ -17,6 +18,14 @@ struct SkillFrontmatter {
 struct SkillFrontmatterMetadata {
     #[serde(default, rename = "short-description")]
     short_description: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CapabilityFrontmatter {
+    #[serde(default)]
+    tags: Vec<String>,
 }
 
 /// Validated metadata parsed from a `SKILL.md` frontmatter block.
@@ -25,6 +34,7 @@ pub struct ParsedSkillFrontmatter {
     pub name: String,
     pub description: String,
     pub short_description: Option<String>,
+    pub tags: Vec<String>,
 }
 
 /// Error produced while parsing or validating `SKILL.md` metadata.
@@ -78,6 +88,7 @@ pub fn parse_skill_frontmatter_metadata(
         .as_deref()
         .map(sanitize_single_line)
         .filter(|value| !value.is_empty());
+    let tags = normalize_tags(parsed.metadata.tags);
 
     validate_len(&name, MAX_NAME_LEN, "name")?;
     if description.is_empty() {
@@ -88,7 +99,24 @@ pub fn parse_skill_frontmatter_metadata(
         name,
         description,
         short_description,
+        tags,
     })
+}
+
+/// Parses exact tag strings from a `CAPABILITY.md` frontmatter block.
+pub fn parse_capability_tags(contents: &str) -> Result<Vec<String>, SkillParseError> {
+    let frontmatter = extract_frontmatter(contents).ok_or(SkillParseError::MissingFrontmatter)?;
+    let parsed: CapabilityFrontmatter =
+        serde_yaml::from_str(&frontmatter).map_err(SkillParseError::InvalidYaml)?;
+    Ok(normalize_tags(parsed.tags))
+}
+
+fn normalize_tags(tags: Vec<String>) -> Vec<String> {
+    let mut seen_tags = HashSet::new();
+    tags.into_iter()
+        .map(|tag| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty() && seen_tags.insert(tag.clone()))
+        .collect()
 }
 
 fn sanitize_single_line(raw: &str) -> String {

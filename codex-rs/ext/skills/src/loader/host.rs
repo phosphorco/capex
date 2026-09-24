@@ -369,6 +369,7 @@ async fn parse_skill_file(
         name,
         description,
         short_description,
+        tags,
     } = parse_skill_frontmatter_metadata(&contents, || default_skill_name(path))
         .map_err(|error| error.to_string())?;
     let LoadedSkillMetadata {
@@ -381,6 +382,7 @@ async fn parse_skill_file(
         name,
         description,
         short_description,
+        tags,
         interface,
         dependencies,
         policy,

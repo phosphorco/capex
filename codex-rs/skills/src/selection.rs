@@ -28,6 +28,16 @@ pub trait ExplicitSkillLookup {
     }
 }
 
+/// Result of resolving explicit references with an additional availability predicate.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ExplicitSkillMentionResult {
+    /// Explicit references that resolved to available skills, in discovery order.
+    pub selected: Vec<SkillMetadata>,
+    /// Names of config-enabled skills that were explicitly referenced but rejected by the
+    /// additional availability predicate. Names are deduplicated in first-reference order.
+    pub unavailable_skill_names: Vec<String>,
+}
+
 /// Collect explicitly mentioned skills from structured and text mentions.
 ///
 /// Structured `UserInput::Skill` selections are resolved first by path against
@@ -44,11 +54,42 @@ pub fn collect_explicit_skill_mentions(
     loaded_skills: &impl ExplicitSkillLookup,
     connector_slug_counts: &HashMap<String, usize>,
 ) -> Vec<SkillMetadata> {
-    let skill_name_counts =
-        build_skill_name_counts(loaded_skills.skills(), loaded_skills.disabled_paths()).0;
+    collect_explicit_skill_mentions_with_availability(
+        inputs,
+        loaded_skills,
+        connector_slug_counts,
+        |_| true,
+    )
+    .selected
+}
+
+/// Collect explicit skill mentions after applying an additional availability predicate.
+///
+/// The predicate is applied before name counts are calculated, so unavailable skills do not
+/// make an otherwise available same-name skill ambiguous. Explicit references that resolve to
+/// config-enabled but unavailable skills are returned in `unavailable_skill_names` for the
+/// caller to explain. This does not report nonexistent names or skills disabled by the normal
+/// skill configuration.
+pub fn collect_explicit_skill_mentions_with_availability<F>(
+    inputs: &[UserInput],
+    loaded_skills: &impl ExplicitSkillLookup,
+    connector_slug_counts: &HashMap<String, usize>,
+    is_available: F,
+) -> ExplicitSkillMentionResult
+where
+    F: Fn(&SkillMetadata) -> bool,
+{
+    let selectable_skills = loaded_skills
+        .skills()
+        .iter()
+        .filter(|skill| loaded_skills.is_skill_enabled(skill) && is_available(skill))
+        .cloned()
+        .collect::<Vec<_>>();
+    let skill_name_counts = build_skill_name_counts(&selectable_skills, &HashSet::new()).0;
 
     let selection_context = SkillSelectionContext {
         loaded_skills,
+        is_available: &is_available,
         skill_name_counts: &skill_name_counts,
         connector_slug_counts,
     };
@@ -56,6 +97,8 @@ pub fn collect_explicit_skill_mentions(
     let mut seen_names: HashSet<String> = HashSet::new();
     let mut seen_paths: HashSet<AbsolutePathBuf> = HashSet::new();
     let mut blocked_plain_names: HashSet<String> = HashSet::new();
+    let mut unavailable_names = Vec::new();
+    let mut unavailable_names_seen = HashSet::new();
 
     for input in inputs {
         if let UserInput::Skill { name, path, .. } = input {
@@ -79,9 +122,14 @@ pub fn collect_explicit_skill_mentions(
                 continue;
             };
 
-            if !selection_context.loaded_skills.is_skill_enabled(skill)
-                || seen_paths.contains(&skill.path_to_skills_md)
-            {
+            if !selection_context.loaded_skills.is_skill_enabled(skill) {
+                continue;
+            }
+            if !(selection_context.is_available)(skill) {
+                record_unavailable_name(skill, &mut unavailable_names_seen, &mut unavailable_names);
+                continue;
+            }
+            if seen_paths.contains(&skill.path_to_skills_md) {
                 continue;
             }
 
@@ -101,27 +149,45 @@ pub fn collect_explicit_skill_mentions(
                 &mut seen_names,
                 &mut seen_paths,
                 &mut selected,
+                &mut unavailable_names_seen,
+                &mut unavailable_names,
             );
         }
     }
 
-    selected
+    ExplicitSkillMentionResult {
+        selected,
+        unavailable_skill_names: unavailable_names,
+    }
 }
 
-struct SkillSelectionContext<'a> {
+fn record_unavailable_name(
+    skill: &SkillMetadata,
+    seen: &mut HashSet<String>,
+    unavailable: &mut Vec<String>,
+) {
+    if seen.insert(skill.name.clone()) {
+        unavailable.push(skill.name.clone());
+    }
+}
+
+struct SkillSelectionContext<'a, F> {
     loaded_skills: &'a dyn ExplicitSkillLookup,
+    is_available: &'a F,
     skill_name_counts: &'a HashMap<String, usize>,
     connector_slug_counts: &'a HashMap<String, usize>,
 }
 
 /// Select mentioned skills while preserving the order of `skills`.
 fn select_skills_from_mentions(
-    selection_context: &SkillSelectionContext<'_>,
+    selection_context: &SkillSelectionContext<'_, impl Fn(&SkillMetadata) -> bool>,
     blocked_plain_names: &HashSet<String>,
     mentions: &ToolMentions<'_>,
     seen_names: &mut HashSet<String>,
     seen_paths: &mut HashSet<AbsolutePathBuf>,
     selected: &mut Vec<SkillMetadata>,
+    unavailable_names_seen: &mut HashSet<String>,
+    unavailable_names: &mut Vec<String>,
 ) {
     if mentions.is_empty() {
         return;
@@ -139,9 +205,7 @@ fn select_skills_from_mentions(
         .collect();
 
     for skill in selection_context.loaded_skills.skills() {
-        if !selection_context.loaded_skills.is_skill_enabled(skill)
-            || seen_paths.contains(&skill.path_to_skills_md)
-        {
+        if !selection_context.loaded_skills.is_skill_enabled(skill) {
             continue;
         }
 
@@ -155,6 +219,13 @@ fn select_skills_from_mentions(
                 ))
             });
         if mention_skill_paths.contains(&canonical_path) || matches_discovery_path {
+            if !(selection_context.is_available)(skill) {
+                record_unavailable_name(skill, unavailable_names_seen, unavailable_names);
+                continue;
+            }
+            if seen_paths.contains(&skill.path_to_skills_md) {
+                continue;
+            }
             seen_paths.insert(skill.path_to_skills_md.clone());
             seen_names.insert(skill.name.clone());
             selected.push(skill.clone());
@@ -162,9 +233,7 @@ fn select_skills_from_mentions(
     }
 
     for skill in selection_context.loaded_skills.skills() {
-        if !selection_context.loaded_skills.is_skill_enabled(skill)
-            || seen_paths.contains(&skill.path_to_skills_md)
-        {
+        if !selection_context.loaded_skills.is_skill_enabled(skill) {
             continue;
         }
 
@@ -172,6 +241,26 @@ fn select_skills_from_mentions(
             continue;
         }
         if !mentions.contains_plain_name(skill.name.as_str()) {
+            continue;
+        }
+
+        if !(selection_context.is_available)(skill) {
+            let available_name_count = selection_context
+                .skill_name_counts
+                .get(skill.name.as_str())
+                .copied()
+                .unwrap_or(0);
+            let connector_count = selection_context
+                .connector_slug_counts
+                .get(&skill.name.to_ascii_lowercase())
+                .copied()
+                .unwrap_or(0);
+            if available_name_count == 0 && connector_count == 0 {
+                record_unavailable_name(skill, unavailable_names_seen, unavailable_names);
+            }
+            continue;
+        }
+        if seen_paths.contains(&skill.path_to_skills_md) {
             continue;
         }
 

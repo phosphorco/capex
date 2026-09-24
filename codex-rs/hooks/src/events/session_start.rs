@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::HookCompletedEvent;
 use codex_protocol::protocol::HookEventName;
+use codex_protocol::protocol::HookExecutionMode;
 use codex_protocol::protocol::HookOutputEntry;
 use codex_protocol::protocol::HookOutputEntryKind;
 use codex_protocol::protocol::HookRunStatus;
@@ -85,6 +86,7 @@ pub struct SessionStartOutcome {
     pub should_stop: bool,
     pub stop_reason: Option<String>,
     pub additional_contexts: Vec<String>,
+    pub capability_grants: Vec<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -92,6 +94,7 @@ struct SessionStartHandlerData {
     should_stop: bool,
     stop_reason: Option<String>,
     additional_contexts_for_model: Vec<AdditionalContext>,
+    capability_grants: Vec<String>,
 }
 
 pub(crate) fn preview(
@@ -124,6 +127,7 @@ pub(crate) async fn run(
             should_stop: false,
             stop_reason: None,
             additional_contexts: Vec::new(),
+            capability_grants: Vec::new(),
         };
     }
 
@@ -206,12 +210,17 @@ pub(crate) async fn run(
         .output_spiller()
         .maybe_spill_additional_contexts(additional_contexts)
         .await;
+    let capability_grants = results
+        .iter()
+        .flat_map(|result| result.data.capability_grants.iter().cloned())
+        .collect();
 
     SessionStartOutcome {
         hook_events: results.into_iter().map(|result| result.completed).collect(),
         should_stop,
         stop_reason,
         additional_contexts,
+        capability_grants,
     }
 }
 
@@ -231,6 +240,7 @@ fn parse_completed(
     let mut should_stop = false;
     let mut stop_reason = None;
     let mut additional_contexts_for_model = Vec::new();
+    let mut capability_grants = Vec::new();
 
     match run_result.error.as_deref() {
         Some(error) => {
@@ -268,6 +278,14 @@ fn parse_completed(
                             handler,
                             additional_context,
                         );
+                    }
+                    if handler.execution_mode() == HookExecutionMode::Sync {
+                        capability_grants.extend(parsed.capability_grants);
+                    } else if !parsed.capability_grants.is_empty() {
+                        entries.push(HookOutputEntry {
+                            kind: HookOutputEntryKind::Warning,
+                            text: "CapEx grants are ignored for asynchronous hooks".to_string(),
+                        });
                     }
                     let _ = parsed.universal.suppress_output;
                     if handler.can_apply_control_effects()
@@ -339,6 +357,7 @@ fn parse_completed(
             should_stop,
             stop_reason,
             additional_contexts_for_model,
+            capability_grants,
         },
         completion_order: 0,
     }
@@ -350,6 +369,7 @@ fn serialization_failure_outcome(hook_events: Vec<HookCompletedEvent>) -> Sessio
         should_stop: false,
         stop_reason: None,
         additional_contexts: Vec::new(),
+        capability_grants: Vec::new(),
     }
 }
 
@@ -389,6 +409,7 @@ mod tests {
                     text: "hello from hook".to_string(),
                     limit: AdditionalContextLimit::from_config(Some(7)),
                 }],
+                capability_grants: Vec::new(),
             }
         );
         assert_eq!(parsed.completed.run.status, HookRunStatus::Completed);
@@ -397,6 +418,44 @@ mod tests {
             vec![HookOutputEntry {
                 kind: HookOutputEntryKind::Context,
                 text: "hello from hook".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn synchronous_session_start_returns_capex_grants() {
+        let parsed = parse_completed(
+            &handler(),
+            run_result(Some(0), r#"{"capex":{"grant":["frontend","docs"]}}"#, ""),
+            /*turn_id*/ None,
+        );
+
+        assert_eq!(parsed.data.capability_grants, vec!["frontend", "docs"]);
+        assert_eq!(parsed.completed.run.status, HookRunStatus::Completed);
+        assert!(parsed.completed.run.entries.is_empty());
+    }
+
+    #[test]
+    fn asynchronous_session_start_grants_are_ignored_and_reported() {
+        let mut async_handler = handler();
+        if let crate::engine::ConfiguredHandlerKind::Command { r#async, .. } =
+            &mut async_handler.kind
+        {
+            *r#async = true;
+        }
+        let parsed = parse_completed(
+            &async_handler,
+            run_result(Some(0), r#"{"capex":{"grant":["frontend"]}}"#, ""),
+            /*turn_id*/ None,
+        );
+
+        assert!(parsed.data.capability_grants.is_empty());
+        assert_eq!(parsed.completed.run.status, HookRunStatus::Completed);
+        assert_eq!(
+            parsed.completed.run.entries,
+            vec![HookOutputEntry {
+                kind: HookOutputEntryKind::Warning,
+                text: "CapEx grants are ignored for asynchronous hooks".to_string(),
             }]
         );
     }
@@ -422,6 +481,7 @@ mod tests {
                     text: "do not inject".to_string(),
                     limit: Default::default(),
                 }],
+                capability_grants: Vec::new(),
             }
         );
         assert_eq!(parsed.completed.run.status, HookRunStatus::Stopped);
@@ -458,6 +518,7 @@ mod tests {
                 should_stop: false,
                 stop_reason: None,
                 additional_contexts_for_model: Vec::new(),
+                capability_grants: Vec::new(),
             }
         );
         assert_eq!(parsed.completed.run.status, HookRunStatus::Failed);
@@ -489,6 +550,7 @@ mod tests {
                     text: "hello from subagent hook".to_string(),
                     limit: AdditionalContextLimit::from_config(Some(4_096)),
                 }],
+                capability_grants: Vec::new(),
             }
         );
         assert_eq!(parsed.completed.turn_id.as_deref(), Some("turn-1"));
@@ -523,6 +585,7 @@ mod tests {
                     text: "child context".to_string(),
                     limit: Default::default(),
                 }],
+                capability_grants: Vec::new(),
             }
         );
         assert_eq!(parsed.completed.turn_id.as_deref(), Some("turn-1"));

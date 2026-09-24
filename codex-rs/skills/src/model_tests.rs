@@ -7,6 +7,7 @@ fn missing_policy_allows_implicit_invocation_and_all_products() {
         name: "demo".to_string(),
         description: "Demo skill".to_string(),
         short_description: None,
+        tags: Vec::new(),
         dependencies: None,
         policy: None,
     };
@@ -26,6 +27,7 @@ fn policy_restricts_implicit_invocation_and_products() {
         name: "demo".to_string(),
         description: "Demo skill".to_string(),
         short_description: None,
+        tags: Vec::new(),
         dependencies: None,
         policy: Some(policy),
     };

@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 
@@ -11,11 +12,13 @@ use codex_core::StartThreadOptions;
 use codex_core::TurnInput;
 use codex_core::TurnInputRequest;
 use codex_core::TurnStartOptions;
+use codex_core::compact::SUMMARIZATION_PROMPT;
 use codex_core::config::Config;
 use codex_core::config::Constrained;
 use codex_core::config::ThreadStoreConfig;
 use codex_features::Feature;
 use codex_history::InitialHistory;
+use codex_history::ResumedHistory;
 use codex_history::RolloutItem;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::built_in_model_providers;
@@ -37,7 +40,9 @@ use codex_protocol::protocol::HookEventName;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSettingsOverrides;
+use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnSettingsUpdate;
 use codex_protocol::protocol::TurnSettingsUpdateOutcome;
 use codex_protocol::request_permissions::PermissionGrantScope;
@@ -46,9 +51,13 @@ use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::request_user_input::RequestUserInputAnswer;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_protocol::user_input::UserInput;
+use codex_thread_store::ForkBoundary;
 use codex_thread_store::InMemoryThreadStore;
+use codex_thread_store::LoadThreadHistoryParams;
+use codex_thread_store::PrepareForkParams;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use core_test_support::TestTargetOs;
+use core_test_support::apps_test_server::AppsTestServer;
 use core_test_support::fs_wait;
 use core_test_support::hooks::trust_discovered_hooks;
 use core_test_support::hooks::trust_hooks;
@@ -65,6 +74,7 @@ use core_test_support::responses::ev_output_text_delta;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_sequence;
+use core_test_support::responses::namespace_child_tool;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_host_windows;
@@ -359,6 +369,119 @@ if payload.get("prompt") == {blocked_prompt_json}:
     fs::write(&script_path, script).context("write user prompt submit hook script")?;
     fs::write(home.join("hooks.json"), hooks.to_string()).context("write hooks.json")?;
     Ok(())
+}
+
+fn write_capex_grant_user_prompt_submit_hook(home: &Path) -> Result<()> {
+    let script_path = home.join("capex_grant_user_prompt_submit_hook.py");
+    let script = r#"import json
+import sys
+
+json.load(sys.stdin)
+print(json.dumps({"capex": {"grant": ["design-review"]}}))
+"#;
+    let hooks = serde_json::json!({
+        "hooks": {
+            "UserPromptSubmit": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": format!("python3 {}", script_path.display()),
+                    "statusMessage": "granting design review capability",
+                }]
+            }]
+        }
+    });
+
+    fs::write(&script_path, script).context("write CapEx grant hook script")?;
+    fs::write(home.join("hooks.json"), hooks.to_string()).context("write hooks.json")?;
+    Ok(())
+}
+
+fn write_capex_grant_user_prompt_submit_hook_with_marker(
+    home: &Path,
+    marker_path: &Path,
+) -> Result<()> {
+    let script_path = home.join("capex_grant_user_prompt_submit_hook.py");
+    let marker = serde_json::to_string(&marker_path.display().to_string())?;
+    let script = format!(
+        r#"import json
+import sys
+
+json.load(sys.stdin)
+open({marker}, "w").close()
+print(json.dumps({{"capex": {{"grant": ["design-review"]}}}}))
+"#
+    );
+    let hooks = serde_json::json!({
+        "hooks": {
+            "UserPromptSubmit": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": format!("python3 {}", script_path.display()),
+                    "statusMessage": "granting design review capability",
+                }]
+            }]
+        }
+    });
+
+    fs::write(&script_path, script).context("write CapEx UserPromptSubmit hook script")?;
+    fs::write(home.join("hooks.json"), hooks.to_string())
+        .context("write CapEx UserPromptSubmit hooks.json")?;
+    Ok(())
+}
+
+fn write_capex_second_prompt_grant_hook(home: &Path) -> Result<()> {
+    let script_path = home.join("capex_second_prompt_grant_hook.py");
+    let script = r#"import json
+import sys
+
+event = json.load(sys.stdin)
+if event.get("prompt") == "second prompt":
+    print(json.dumps({"capex": {"grant": ["capex-dynamic"]}}))
+else:
+    print(json.dumps({}))
+"#;
+    let hooks = serde_json::json!({
+        "hooks": {
+            "UserPromptSubmit": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": format!("python3 {}", script_path.display()),
+                    "statusMessage": "granting dynamic capability",
+                }]
+            }]
+        }
+    });
+
+    fs::write(&script_path, script).context("write conditional CapEx grant hook script")?;
+    fs::write(home.join("hooks.json"), hooks.to_string())
+        .context("write conditional CapEx grant hooks.json")?;
+    Ok(())
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    original: Option<OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let original = std::env::var_os(key);
+        // SAFETY: this test owns these CapEx-only variables and restores them on drop.
+        unsafe { std::env::set_var(key, value) };
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        // SAFETY: restore the process environment to its pre-test value.
+        unsafe {
+            match &self.original {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 }
 
 fn write_async_user_prompt_submit_hook(home: &Path, gated: bool) -> Result<()> {
@@ -1624,6 +1747,976 @@ async fn session_start_runs_before_user_prompt_submit_on_first_turn() -> Result<
 }
 
 #[tokio::test]
+#[serial_test::serial]
+async fn user_prompt_submit_capex_grant_exposes_tagged_skill_before_model_request() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    const CAPABILITY_BODY: &str = "Capability guidance available to the model.";
+    const SKILL_DESCRIPTION: &str = "A tagged skill revealed by the capability grant.";
+    const SKILL_BODY: &str = "Use this design review workflow.";
+
+    let _mode = EnvVarGuard::set("CAPEX_CAPABILITY_MODE", "1");
+    let _initial = EnvVarGuard::set("CAPEX_INITIAL_CAPABILITIES", "");
+    let _excluded = EnvVarGuard::set("CAPEX_ALWAYS_EXCLUDE_TAGS", "");
+
+    let server = start_mock_server().await;
+    let response = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+    )
+    .await;
+
+    let mut extensions = codex_extension_api::ExtensionRegistryBuilder::<Config>::new();
+    codex_skills_extension::install(&mut extensions, |config: &Config| {
+        codex_skills_extension::SkillsExtensionConfig {
+            include_instructions: config.include_skill_instructions,
+            max_context_tokens: config.skill_max_context_tokens,
+            bundled_skills_enabled: false,
+            cloud_skill_enabled: false,
+            shadow_selection_enabled: false,
+        }
+    });
+
+    let mut builder = test_codex()
+        .with_extensions(Arc::new(extensions.build()))
+        .with_pre_build_hook(|home| {
+            write_capex_grant_user_prompt_submit_hook(home)
+                .expect("write CapEx UserPromptSubmit hook");
+        })
+        .with_workspace_setup(|cwd, fs| async move {
+            let capability_dir = cwd.join(".agents/capabilities/design-review");
+            fs.create_directory(
+                &codex_utils_path_uri::PathUri::from_abs_path(&capability_dir),
+                codex_exec_server::CreateDirectoryOptions {
+                    recursive: true,
+                    follow_symlinks: true,
+                },
+                /*sandbox*/ None,
+            )
+            .await?;
+            fs.write_file(
+                &codex_utils_path_uri::PathUri::from_abs_path(
+                    &capability_dir.join("CAPABILITY.md"),
+                ),
+                format!("---\ntags: [frontend]\n---\n\n{CAPABILITY_BODY}\n").into_bytes(),
+                Default::default(),
+                /*sandbox*/ None,
+            )
+            .await?;
+
+            let skill_dir = cwd.join(".agents/skills/design-review-skill");
+            fs.create_directory(
+                &codex_utils_path_uri::PathUri::from_abs_path(&skill_dir),
+                codex_exec_server::CreateDirectoryOptions {
+                    recursive: true,
+                    follow_symlinks: true,
+                },
+                /*sandbox*/ None,
+            )
+            .await?;
+            fs.write_file(
+                &codex_utils_path_uri::PathUri::from_abs_path(&skill_dir.join("SKILL.md")),
+                format!(
+                    "---\nname: design-review-skill\ndescription: {SKILL_DESCRIPTION}\nmetadata:\n  tags: [frontend]\n---\n\n{SKILL_BODY}\n"
+                )
+                .into_bytes(),
+                Default::default(),
+                /*sandbox*/ None,
+            )
+            .await?;
+            Ok(())
+        })
+        .with_config(|config| {
+            config.include_skill_instructions = true;
+            trust_discovered_hooks(config);
+        });
+    let test = builder.build(&server).await?;
+
+    test.submit_turn("Use $design-review-skill to review this change.")
+        .await?;
+
+    let request = response.single_request();
+    let developer_text = request.message_input_texts("developer").join("\n");
+    assert!(
+        developer_text.contains(CAPABILITY_BODY),
+        "first model request should include the granted capability body: {developer_text}"
+    );
+    assert!(
+        developer_text.contains(&format!("design-review-skill: {SKILL_DESCRIPTION}")),
+        "first model request should reveal the newly available skill metadata: {developer_text}"
+    );
+    let user_text = request.message_input_texts("user").join("\n");
+    assert!(
+        user_text.contains(SKILL_BODY),
+        "the same request should include the explicitly selected tagged skill body: {user_text}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn user_prompt_submit_capex_grant_adds_skill_mcp_dependency_to_first_request() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    const SKILL_DESCRIPTION: &str = "A tagged skill requiring an optional MCP server.";
+    const SKILL_BODY: &str = "Use the calendar MCP server for this design review.";
+    const SERVER_NAME: &str = "capex_skill_server";
+    const TOOL_NAME: &str = "calendar_create_event";
+
+    let _mode = EnvVarGuard::set("CAPEX_CAPABILITY_MODE", "1");
+    let _initial = EnvVarGuard::set("CAPEX_INITIAL_CAPABILITIES", "");
+    let _excluded = EnvVarGuard::set("CAPEX_ALWAYS_EXCLUDE_TAGS", "");
+
+    let responses_server = start_mock_server().await;
+    let mcp_mock = start_mock_server().await;
+    let (mcp_server, startup_control) =
+        AppsTestServer::mount_with_startup_control(&mcp_mock).await?;
+    let release_startup = startup_control.hold_next_successful_initialize();
+    let server_url = format!("{}/api/codex/ps/mcp", mcp_server.chatgpt_base_url);
+    let response = mount_sse_once(
+        &responses_server,
+        sse(vec![
+            ev_response_created("resp-capex-skill-mcp"),
+            ev_completed("resp-capex-skill-mcp"),
+        ]),
+    )
+    .await;
+
+    let marker_path = Arc::new(std::sync::Mutex::new(None::<std::path::PathBuf>));
+    let marker_path_for_build = Arc::clone(&marker_path);
+    let test = test_codex()
+        .with_model_info_override("gpt-5.4", |model| model.supports_search_tool = false)
+        .with_pre_build_hook(move |home| {
+            let marker = home.join("capex-hook-ran");
+            *marker_path_for_build
+                .lock()
+                .expect("marker path mutex should not be poisoned") = Some(marker.clone());
+            write_capex_grant_user_prompt_submit_hook_with_marker(home, &marker)
+                .expect("write marker-producing CapEx grant hook");
+        })
+        .with_workspace_setup(|cwd, fs| async move {
+            let capability_dir = cwd.join(".agents/capabilities/design-review");
+            fs.create_directory(
+                &codex_utils_path_uri::PathUri::from_abs_path(&capability_dir),
+                codex_exec_server::CreateDirectoryOptions {
+                    recursive: true,
+                    follow_symlinks: true,
+                },
+                /*sandbox*/ None,
+            )
+            .await?;
+            fs.write_file(
+                &codex_utils_path_uri::PathUri::from_abs_path(
+                    &capability_dir.join("CAPABILITY.md"),
+                ),
+                b"---\ntags: [frontend]\n---\n\nGranted design review context.\n".to_vec(),
+                Default::default(),
+                /*sandbox*/ None,
+            )
+            .await?;
+
+            let skill_dir = cwd.join(".agents/skills/design-review-skill");
+            let agents_dir = skill_dir.join("agents");
+            fs.create_directory(
+                &codex_utils_path_uri::PathUri::from_abs_path(&agents_dir),
+                codex_exec_server::CreateDirectoryOptions {
+                    recursive: true,
+                    follow_symlinks: true,
+                },
+                /*sandbox*/ None,
+            )
+            .await?;
+            fs.write_file(
+                &codex_utils_path_uri::PathUri::from_abs_path(&skill_dir.join("SKILL.md")),
+                format!(
+                    "---\nname: design-review-skill\ndescription: {SKILL_DESCRIPTION}\nmetadata:\n  tags: [frontend]\n---\n\n{SKILL_BODY}\n"
+                )
+                .into_bytes(),
+                Default::default(),
+                /*sandbox*/ None,
+            )
+            .await?;
+            fs.write_file(
+                &codex_utils_path_uri::PathUri::from_abs_path(&agents_dir.join("openai.yaml")),
+                format!(
+                    "dependencies:\n  tools:\n    - type: mcp\n      value: {SERVER_NAME}\n"
+                )
+                .into_bytes(),
+                Default::default(),
+                /*sandbox*/ None,
+            )
+            .await?;
+            Ok(())
+        })
+        .with_config(move |config| {
+            config.include_skill_instructions = true;
+            config.mcp_optional_startup_grace = Duration::from_millis(50);
+            let mut servers = config.mcp_servers.get().clone();
+            servers.insert(
+                SERVER_NAME.to_string(),
+                serde_json::from_value(json!({
+                    "url": server_url,
+                    "enabled_tools": [TOOL_NAME],
+                    "startup_timeout_sec": 10.0,
+                }))
+                .expect("valid tagged skill MCP server configuration"),
+            );
+            config
+                .mcp_servers
+                .set(servers)
+                .expect("tagged skill MCP server should satisfy test configuration");
+            trust_discovered_hooks(config);
+        })
+        .build(&responses_server)
+        .await?;
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while startup_control.initialize_attempts() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .context("tagged skill MCP initialization should begin before the first turn")?;
+
+    let mut turn = Box::pin(test.submit_turn("Use $design-review-skill for this change."));
+    let marker_path = marker_path
+        .lock()
+        .expect("marker path mutex should not be poisoned")
+        .clone()
+        .context("hook marker path should be configured")?;
+    let mut turn_result = None;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::select! {
+            result = &mut turn => turn_result = Some(result),
+            _ = async {
+                while !marker_path.exists() {
+                    tokio::task::yield_now().await;
+                }
+            } => {}
+        }
+    })
+    .await
+    .context("CapEx prompt hook should complete while optional MCP startup is gated")?;
+    release_startup
+        .send(())
+        .expect("the MCP initialization attempt should still be gated");
+    if turn_result.is_none() {
+        tokio::time::timeout(Duration::from_secs(5), &mut turn)
+            .await
+            .context("first turn should finish after its required MCP server starts")??;
+    } else {
+        turn_result
+            .expect("turn result was stored")
+            .context("model request before releasing optional MCP startup")?;
+    }
+
+    let request = response.single_request();
+    let body = request.body_json();
+    assert!(
+        namespace_child_tool(&body, "mcp__capex_skill_server", TOOL_NAME).is_some(),
+        "the first request must include the newly eligible skill's MCP dependency: {body}"
+    );
+    let developer_text = request.message_input_texts("developer").join("\n");
+    assert!(developer_text.contains("Granted design review context."));
+    assert!(
+        request
+            .message_input_texts("user")
+            .join("\n")
+            .contains(SKILL_BODY)
+    );
+
+    test.codex.shutdown_and_wait().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn capex_explicit_skill_selection_filters_hidden_duplicates_and_warns_for_gated_name()
+-> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    const VISIBLE_BODY: &str = "The available same-name skill should be selected.";
+    const HIDDEN_BODY: &str = "The gated duplicate must not affect explicit selection.";
+    const RESTRICTED_BODY: &str = "The gated-only skill must not be injected.";
+
+    let _mode = EnvVarGuard::set("CAPEX_CAPABILITY_MODE", "1");
+    let _initial = EnvVarGuard::set("CAPEX_INITIAL_CAPABILITIES", "capex-front");
+    let _excluded = EnvVarGuard::set("CAPEX_ALWAYS_EXCLUDE_TAGS", "");
+
+    let server = start_mock_server().await;
+    let response = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-capex-explicit-filter"),
+            ev_completed("resp-capex-explicit-filter"),
+        ]),
+    )
+    .await;
+    let test = test_codex()
+        .with_workspace_setup(|cwd, fs| async move {
+            let capability_dir = cwd.join(".agents/capabilities/capex-front");
+            fs.create_directory(
+                &codex_utils_path_uri::PathUri::from_abs_path(&capability_dir),
+                codex_exec_server::CreateDirectoryOptions {
+                    recursive: true,
+                    follow_symlinks: true,
+                },
+                /*sandbox*/ None,
+            )
+            .await?;
+            fs.write_file(
+                &codex_utils_path_uri::PathUri::from_abs_path(
+                    &capability_dir.join("CAPABILITY.md"),
+                ),
+                b"---\ntags: [frontend]\n---\n\nFrontend capability.\n".to_vec(),
+                Default::default(),
+                /*sandbox*/ None,
+            )
+            .await?;
+
+            for (directory, tags, body) in [
+                ("available-twin", "frontend", VISIBLE_BODY),
+                ("gated-twin", "backend", HIDDEN_BODY),
+                ("gated-only", "backend", RESTRICTED_BODY),
+            ] {
+                let skill_dir = cwd.join(format!(".agents/skills/{directory}"));
+                fs.create_directory(
+                    &codex_utils_path_uri::PathUri::from_abs_path(&skill_dir),
+                    codex_exec_server::CreateDirectoryOptions {
+                        recursive: true,
+                        follow_symlinks: true,
+                    },
+                    /*sandbox*/ None,
+                )
+                .await?;
+                let name = if directory == "gated-only" {
+                    "restricted-review-skill"
+                } else {
+                    "shared-review-skill"
+                };
+                fs.write_file(
+                    &codex_utils_path_uri::PathUri::from_abs_path(&skill_dir.join("SKILL.md")),
+                    format!(
+                        "---\nname: {name}\ndescription: Explicit CapEx selection test skill.\nmetadata:\n  tags: [{tags}]\n---\n\n{body}\n"
+                    )
+                    .into_bytes(),
+                    Default::default(),
+                    /*sandbox*/ None,
+                )
+                .await?;
+            }
+            Ok(())
+        })
+        .with_config(|config| {
+            config.include_skill_instructions = true;
+        })
+        .build(&server)
+        .await?;
+
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "Use $shared-review-skill and $restricted-review-skill.".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+
+    let mut warning_messages = Vec::new();
+    loop {
+        match core_test_support::wait_for_event(&test.codex, |_| true).await {
+            EventMsg::Warning(warning) => warning_messages.push(warning.message),
+            EventMsg::TurnComplete(_) => break,
+            _ => {}
+        }
+    }
+
+    let request = response.single_request();
+    let user_text = request.message_input_texts("user").join("\n");
+    assert!(
+        user_text.contains(VISIBLE_BODY),
+        "available duplicate was not injected: {user_text}"
+    );
+    assert!(
+        !user_text.contains(HIDDEN_BODY),
+        "gated duplicate leaked: {user_text}"
+    );
+    assert!(
+        !user_text.contains(RESTRICTED_BODY),
+        "gated-only skill leaked: {user_text}"
+    );
+    let gated_warning_count = warning_messages
+        .iter()
+        .filter(|message| {
+            message.as_str() == "Skill `$restricted-review-skill` is unavailable in this session."
+        })
+        .count();
+    assert_eq!(
+        gated_warning_count, 1,
+        "explicit gated-only reference should produce exactly one user-visible warning: {warning_messages:?}"
+    );
+    assert!(
+        warning_messages
+            .iter()
+            .all(|message| !message.contains("shared-review-skill")),
+        "an available same-name skill should prevent a false unavailable warning: {warning_messages:?}"
+    );
+
+    test.codex.shutdown_and_wait().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn capex_fork_before_first_turn_keeps_initial_grant() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    const INITIAL_BODY: &str = "Initial capability exists before the first turn.";
+
+    let _mode = EnvVarGuard::set("CAPEX_CAPABILITY_MODE", "1");
+    let _initial = EnvVarGuard::set("CAPEX_INITIAL_CAPABILITIES", "capex-initial");
+    let _excluded = EnvVarGuard::set("CAPEX_ALWAYS_EXCLUDE_TAGS", "");
+
+    let server = start_mock_server().await;
+    let test = test_codex()
+        .with_workspace_setup(|cwd, fs| async move {
+            let capability_dir = cwd.join(".agents/capabilities/capex-initial");
+            fs.create_directory(
+                &codex_utils_path_uri::PathUri::from_abs_path(&capability_dir),
+                codex_exec_server::CreateDirectoryOptions {
+                    recursive: true,
+                    follow_symlinks: true,
+                },
+                /*sandbox*/ None,
+            )
+            .await?;
+            fs.write_file(
+                &codex_utils_path_uri::PathUri::from_abs_path(
+                    &capability_dir.join("CAPABILITY.md"),
+                ),
+                format!("---\ntags: [test]\n---\n\n{INITIAL_BODY}\n").into_bytes(),
+                Default::default(),
+                /*sandbox*/ None,
+            )
+            .await?;
+            Ok(())
+        })
+        .build(&server)
+        .await?;
+    let forked = test
+        .thread_manager
+        .fork_thread_from_history(
+            ForkSnapshot::TruncateBeforeNthUserMessage(0),
+            StartThreadOptions::new(test.config.clone()),
+            InitialHistory::Resumed(ResumedHistory {
+                conversation_id: test.session_configured.thread_id,
+                history: Arc::new(Vec::new()),
+                rollout_path: None,
+            }),
+        )
+        .await?
+        .thread;
+    let responses = mount_sse_sequence(&server, vec![sse(vec![ev_completed("resp-fork")])]).await;
+    forked
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "fork prompt".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&forked, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 1);
+    let developer_text = requests[0].message_input_texts("developer").join("\n");
+    assert!(
+        developer_text.contains(INITIAL_BODY),
+        "the initial grant must survive a pre-turn fork: {developer_text}"
+    );
+
+    forked.shutdown_and_wait().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn capex_fork_cutoff_excludes_later_dynamic_grant() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    const BASELINE_BODY: &str = "Baseline capability remains active.";
+    const DYNAMIC_BODY: &str = "Dynamically granted capability must stay after the cutoff.";
+
+    let _mode = EnvVarGuard::set("CAPEX_CAPABILITY_MODE", "1");
+    let _initial = EnvVarGuard::set("CAPEX_INITIAL_CAPABILITIES", "capex-baseline");
+    let _excluded = EnvVarGuard::set("CAPEX_ALWAYS_EXCLUDE_TAGS", "");
+
+    let server = start_mock_server().await;
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![ev_completed("resp-parent-1")]),
+            sse(vec![ev_completed("resp-parent-2")]),
+            sse(vec![ev_completed("resp-fork")]),
+        ],
+    )
+    .await;
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            write_capex_second_prompt_grant_hook(home).expect("write conditional CapEx grant hook");
+        })
+        .with_workspace_setup(|cwd, fs| async move {
+            for (id, body) in [
+                ("capex-baseline", BASELINE_BODY),
+                ("capex-dynamic", DYNAMIC_BODY),
+            ] {
+                let capability_dir = cwd.join(format!(".agents/capabilities/{id}"));
+                fs.create_directory(
+                    &codex_utils_path_uri::PathUri::from_abs_path(&capability_dir),
+                    codex_exec_server::CreateDirectoryOptions {
+                        recursive: true,
+                        follow_symlinks: true,
+                    },
+                    /*sandbox*/ None,
+                )
+                .await?;
+                fs.write_file(
+                    &codex_utils_path_uri::PathUri::from_abs_path(
+                        &capability_dir.join("CAPABILITY.md"),
+                    ),
+                    format!("---\ntags: [test]\n---\n\n{body}\n").into_bytes(),
+                    Default::default(),
+                    /*sandbox*/ None,
+                )
+                .await?;
+            }
+            Ok(())
+        })
+        .with_config(trust_discovered_hooks);
+
+    // Command hooks run on the host and require a host-native working directory.
+    let test = builder.build(&server).await?;
+    test.submit_turn("first prompt").await?;
+    test.submit_turn("second prompt").await?;
+    test.codex.flush_rollout().await?;
+
+    let parent_requests = responses.requests();
+    assert_eq!(parent_requests.len(), 2);
+    let first_developer_text = parent_requests[0]
+        .message_input_texts("developer")
+        .join("\n");
+    assert!(first_developer_text.contains(BASELINE_BODY));
+    assert!(!first_developer_text.contains(DYNAMIC_BODY));
+    let second_developer_text = parent_requests[1]
+        .message_input_texts("developer")
+        .join("\n");
+    assert!(second_developer_text.contains(BASELINE_BODY));
+    assert!(second_developer_text.contains(DYNAMIC_BODY));
+
+    let forked = test
+        .thread_manager
+        .fork_thread(
+            ForkSnapshot::TruncateBeforeNthUserMessage(1),
+            StartThreadOptions::new(test.config.clone()),
+            test.codex.rollout_path().expect("parent rollout path"),
+        )
+        .await?
+        .thread;
+    forked
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "fork prompt".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&forked, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 3);
+    let fork_developer_text = requests[2].message_input_texts("developer").join("\n");
+    assert!(
+        fork_developer_text.contains(BASELINE_BODY),
+        "the fork should retain the initial capability granted before the cutoff: {fork_developer_text}"
+    );
+    assert!(
+        !fork_developer_text.contains(DYNAMIC_BODY),
+        "the fork must not inherit a capability granted after the selected history cutoff: {fork_developer_text}"
+    );
+
+    forked.shutdown_and_wait().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn prepared_capex_fork_copies_scrubbed_guidance_and_cold_resumes() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    const BASELINE_BODY: &str = "Baseline capability remains active after the fork.";
+    const DYNAMIC_BODY: &str = "This post-cutoff capability must never reach the child.";
+
+    let _mode = EnvVarGuard::set("CAPEX_CAPABILITY_MODE", "1");
+    let _initial = EnvVarGuard::set("CAPEX_INITIAL_CAPABILITIES", "capex-baseline");
+    let _excluded = EnvVarGuard::set("CAPEX_ALWAYS_EXCLUDE_TAGS", "");
+
+    let server = start_mock_server().await;
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![ev_completed("resp-parent-retained")]),
+            sse(vec![ev_completed("resp-parent-excluded")]),
+            sse(vec![ev_completed("resp-child-fork")]),
+            sse(vec![ev_completed("resp-child-resume")]),
+        ],
+    )
+    .await;
+    let model_provider = non_openai_model_provider(&server);
+    let test = test_codex()
+        .with_history_mode(ThreadHistoryMode::Paginated)
+        .with_pre_build_hook(|home| {
+            write_capex_second_prompt_grant_hook(home).expect("write conditional CapEx grant hook");
+        })
+        .with_workspace_setup(|cwd, fs| async move {
+            for (id, body) in [
+                ("capex-baseline", BASELINE_BODY),
+                ("capex-dynamic", DYNAMIC_BODY),
+            ] {
+                let capability_dir = cwd.join(format!(".agents/capabilities/{id}"));
+                fs.create_directory(
+                    &codex_utils_path_uri::PathUri::from_abs_path(&capability_dir),
+                    codex_exec_server::CreateDirectoryOptions {
+                        recursive: true,
+                        follow_symlinks: true,
+                    },
+                    /*sandbox*/ None,
+                )
+                .await?;
+                fs.write_file(
+                    &codex_utils_path_uri::PathUri::from_abs_path(
+                        &capability_dir.join("CAPABILITY.md"),
+                    ),
+                    format!("---\ntags: [test]\n---\n\n{body}\n").into_bytes(),
+                    Default::default(),
+                    /*sandbox*/ None,
+                )
+                .await?;
+            }
+            Ok(())
+        })
+        .with_config(move |config| {
+            config.model_provider = model_provider;
+            config.experimental_thread_store = ThreadStoreConfig::Local;
+            trust_discovered_hooks(config);
+        })
+        .build(&server)
+        .await?;
+
+    test.submit_turn("retained prompt").await?;
+    test.submit_turn("second prompt").await?;
+    test.codex.flush_rollout().await?;
+
+    let parent_requests = responses.requests();
+    assert_eq!(parent_requests.len(), 2);
+    let retained_text = parent_requests[0]
+        .message_input_texts("developer")
+        .join("\n");
+    assert!(retained_text.contains(BASELINE_BODY));
+    assert!(!retained_text.contains(DYNAMIC_BODY));
+    let excluded_text = parent_requests[1]
+        .message_input_texts("developer")
+        .join("\n");
+    assert!(excluded_text.contains(BASELINE_BODY));
+    assert!(excluded_text.contains(DYNAMIC_BODY));
+    let excluded_turn_id = parent_requests[1].body_json()["client_metadata"]["turn_id"]
+        .as_str()
+        .context("second parent turn id")?
+        .to_string();
+
+    let prepared = test
+        .thread_store
+        .prepare_fork(PrepareForkParams {
+            thread_id: test.session_configured.thread_id,
+            boundary: ForkBoundary::BeforeTurn(excluded_turn_id),
+        })
+        .await?;
+    let expected_cutoff = prepared
+        .history_base
+        .context("prepared fork history base")?
+        .end_ordinal_exclusive;
+    let forked = test
+        .thread_manager
+        .fork_prepared_thread(StartThreadOptions::new(test.config.clone()), prepared)
+        .await?
+        .thread;
+    forked
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "fork prompt".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&forked, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    forked.flush_rollout().await?;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 3);
+    let fork_text = requests[2].message_input_texts("developer").join("\n");
+    assert!(fork_text.contains(BASELINE_BODY));
+    assert!(!fork_text.contains(DYNAMIC_BODY));
+
+    let child_path = forked.rollout_path().context("child rollout path")?;
+    let child_meta = codex_rollout::read_session_meta_line(&child_path).await?;
+    assert!(
+        child_meta.meta.history_base.is_none(),
+        "CapEx-scrubbed fork must own a copied history prefix"
+    );
+    assert_eq!(
+        child_meta.meta.forked_from_ordinal_exclusive,
+        Some(expected_cutoff),
+        "copied fork should retain its logical parent cutoff"
+    );
+    forked.shutdown_and_wait().await?;
+
+    let child_thread_id = child_meta.meta.id;
+    let persisted_history = test
+        .thread_store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id: child_thread_id,
+            include_archived: true,
+        })
+        .await?;
+    let resumed = test
+        .thread_manager
+        .resume_thread_with_history(
+            test.config.clone(),
+            InitialHistory::Resumed(ResumedHistory {
+                conversation_id: child_thread_id,
+                history: Arc::new(persisted_history.items),
+                rollout_path: Some(child_path),
+            }),
+            test.thread_manager.auth_manager(),
+            None,
+            ClientMcpExtensions::default(),
+        )
+        .await?
+        .thread;
+    resumed
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "cold resume prompt".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&resumed, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 4);
+    let resumed_text = requests[3].message_input_texts("developer").join("\n");
+    assert!(resumed_text.contains(BASELINE_BODY));
+    assert!(
+        !resumed_text.contains(DYNAMIC_BODY),
+        "cold resume must not reintroduce the excluded source prefix: {resumed_text}"
+    );
+    let resumed_turn_metadata: Value = serde_json::from_str(
+        requests[3].body_json()["client_metadata"]["x-codex-turn-metadata"]
+            .as_str()
+            .context("resumed turn metadata")?,
+    )?;
+    assert_eq!(
+        resumed_turn_metadata["forked_from_ordinal_exclusive"],
+        expected_cutoff
+    );
+
+    resumed.shutdown_and_wait().await?;
+    test.codex.shutdown_and_wait().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn capex_spawned_child_scrubs_parent_guidance_before_first_request_and_resume() -> Result<()>
+{
+    skip_if_no_network!(Ok(()));
+
+    const BASELINE_BODY: &str = "The child's configured baseline capability remains active.";
+    const DYNAMIC_BODY: &str = "This parent-only capability must never reach the child.";
+
+    let _mode = EnvVarGuard::set("CAPEX_CAPABILITY_MODE", "1");
+    let _initial = EnvVarGuard::set("CAPEX_INITIAL_CAPABILITIES", "capex-baseline");
+    let _excluded = EnvVarGuard::set("CAPEX_ALWAYS_EXCLUDE_TAGS", "");
+
+    let server = start_mock_server().await;
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![ev_completed("resp-capex-child-parent-initial")]),
+            sse(vec![ev_completed("resp-capex-child-parent-grant")]),
+            sse(vec![ev_completed("resp-capex-child-first")]),
+            sse(vec![ev_completed("resp-capex-child-resume")]),
+        ],
+    )
+    .await;
+    let model_provider = non_openai_model_provider(&server);
+    let test = test_codex()
+        .with_history_mode(ThreadHistoryMode::Paginated)
+        .with_pre_build_hook(|home| {
+            write_capex_second_prompt_grant_hook(home).expect("write conditional CapEx grant hook");
+        })
+        .with_workspace_setup(|cwd, fs| async move {
+            for (id, body) in [
+                ("capex-baseline", BASELINE_BODY),
+                ("capex-dynamic", DYNAMIC_BODY),
+            ] {
+                let capability_dir = cwd.join(format!(".agents/capabilities/{id}"));
+                fs.create_directory(
+                    &codex_utils_path_uri::PathUri::from_abs_path(&capability_dir),
+                    codex_exec_server::CreateDirectoryOptions {
+                        recursive: true,
+                        follow_symlinks: true,
+                    },
+                    /*sandbox*/ None,
+                )
+                .await?;
+                fs.write_file(
+                    &codex_utils_path_uri::PathUri::from_abs_path(
+                        &capability_dir.join("CAPABILITY.md"),
+                    ),
+                    format!("---\ntags: [test]\n---\n\n{body}\n").into_bytes(),
+                    Default::default(),
+                    /*sandbox*/ None,
+                )
+                .await?;
+            }
+            Ok(())
+        })
+        .with_config(move |config| {
+            config.model_provider = model_provider;
+            config.experimental_thread_store = ThreadStoreConfig::Local;
+            trust_discovered_hooks(config);
+        })
+        .build(&server)
+        .await?;
+
+    test.submit_turn("retained parent prompt").await?;
+    test.submit_turn("second prompt").await?;
+    test.codex.flush_rollout().await?;
+
+    let parent_text = responses.requests()[1]
+        .message_input_texts("developer")
+        .join("\n");
+    assert!(parent_text.contains(DYNAMIC_BODY));
+
+    let parent_history = test
+        .thread_store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id: test.session_configured.thread_id,
+            include_archived: true,
+        })
+        .await?;
+    let child = test
+        .thread_manager
+        .start_thread(StartThreadOptions {
+            initial_history: InitialHistory::Forked(parent_history.items),
+            session_source: Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: test.session_configured.thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            })),
+            thread_source: Some(ThreadSource::Subagent),
+            history_mode: Some(ThreadHistoryMode::Paginated),
+            ..StartThreadOptions::new(test.config.clone())
+        })
+        .await?
+        .thread;
+    child
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "child prompt".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&child, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    child.flush_rollout().await?;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 3);
+    let child_text = requests[2].message_input_texts("developer").join("\n");
+    assert!(child_text.contains(BASELINE_BODY));
+    assert!(
+        !child_text.contains(DYNAMIC_BODY),
+        "first child request must not inherit a parent-only grant: {child_text}"
+    );
+
+    let child_thread_id = child.startup_metadata().thread_id;
+    let child_path = child.rollout_path().context("child rollout path")?;
+    child.shutdown_and_wait().await?;
+    let mut persisted_history = test
+        .thread_store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id: child_thread_id,
+            include_archived: true,
+        })
+        .await?;
+    let persisted_debug = serde_json::to_string(&persisted_history.items)?;
+    assert!(
+        !persisted_debug.contains(DYNAMIC_BODY),
+        "the copied/paginated child prefix must persist without its parent's grant: {persisted_debug}"
+    );
+    // Simulate an older child rollout authored before early prefix scrubbing. Resume must remove
+    // the inherited marker from its in-memory context without rewriting the saved JSONL.
+    let inherited_parent_guidance =
+        format!("<capex_capability>Capability capex-dynamic:\n{DYNAMIC_BODY}</capex_capability>");
+    let contaminated = RolloutItem::ResponseItem(
+        ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: inherited_parent_guidance,
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }
+        .into(),
+    );
+    let insert_at = persisted_history
+        .items
+        .iter()
+        .position(|item| matches!(item, RolloutItem::SessionMeta(_)))
+        .map_or(0, |index| index + 1);
+    persisted_history.items.insert(insert_at, contaminated);
+    let resumed = test
+        .thread_manager
+        .resume_thread_with_history(
+            test.config.clone(),
+            InitialHistory::Resumed(ResumedHistory {
+                conversation_id: child_thread_id,
+                history: Arc::new(persisted_history.items.clone()),
+                rollout_path: Some(child_path),
+            }),
+            test.thread_manager.auth_manager(),
+            None,
+            ClientMcpExtensions::default(),
+        )
+        .await?
+        .thread;
+    resumed
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "cold child resume".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&resumed, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 4);
+    let resumed_text = requests[3].message_input_texts("developer").join("\n");
+    assert!(resumed_text.contains(BASELINE_BODY));
+    assert!(
+        !resumed_text.contains(DYNAMIC_BODY),
+        "cold child resume must not reintroduce parent-only CapEx guidance: {resumed_text}"
+    );
+
+    resumed.shutdown_and_wait().await?;
+    test.codex.shutdown_and_wait().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn forked_thread_matches_fork_session_start_without_repeating_startup_context() -> Result<()>
 {
     skip_if_no_network!(Ok(()));
@@ -2404,6 +3497,148 @@ async fn mid_turn_auto_compact_session_start_hooks_run_before_each_continuation(
             .collect::<Vec<_>>(),
         vec!["compact", "compact"],
         "the next user turn should not invoke stale compact hooks",
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn mid_turn_auto_compact_keeps_capex_grant_and_tagged_skill_context() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    const CAPABILITY_BODY: &str = "Compaction must preserve this granted capability.";
+    const SKILL_DESCRIPTION: &str = "A tagged skill that stays eligible after compaction.";
+    const SKILL_BODY: &str = "Use this design review workflow after compaction.";
+
+    let _mode = EnvVarGuard::set("CAPEX_CAPABILITY_MODE", "1");
+    let _initial = EnvVarGuard::set("CAPEX_INITIAL_CAPABILITIES", "");
+    let _excluded = EnvVarGuard::set("CAPEX_ALWAYS_EXCLUDE_TAGS", "");
+
+    let server = start_mock_server().await;
+    let over_limit_tokens = 250_000;
+    let compacted_tokens = 50;
+    let request_log = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("capex-auto-1"),
+                ev_function_call("call-capex-auto-1", "test_tool", "{}"),
+                ev_completed_with_tokens("capex-auto-1", over_limit_tokens),
+            ]),
+            sse(vec![
+                ev_response_created("capex-auto-compact"),
+                ev_assistant_message("capex-auto-summary", "Compacted design review state."),
+                ev_completed_with_tokens("capex-auto-compact", compacted_tokens),
+            ]),
+            sse(vec![
+                ev_response_created("capex-auto-next"),
+                ev_assistant_message("capex-auto-final", "The design review is complete."),
+                ev_completed_with_tokens("capex-auto-next", compacted_tokens),
+            ]),
+        ],
+    )
+    .await;
+
+    let mut extensions = codex_extension_api::ExtensionRegistryBuilder::<Config>::new();
+    codex_skills_extension::install(&mut extensions, |config: &Config| {
+        codex_skills_extension::SkillsExtensionConfig {
+            include_instructions: config.include_skill_instructions,
+            max_context_tokens: config.skill_max_context_tokens,
+            bundled_skills_enabled: false,
+            cloud_skill_enabled: false,
+            shadow_selection_enabled: false,
+        }
+    });
+    let model_provider = non_openai_model_provider(&server);
+    let test = test_codex()
+        .with_extensions(Arc::new(extensions.build()))
+        .with_pre_build_hook(|home| {
+            write_capex_grant_user_prompt_submit_hook(home)
+                .expect("write CapEx UserPromptSubmit hook");
+        })
+        .with_workspace_setup(|cwd, fs| async move {
+            let capability_dir = cwd.join(".agents/capabilities/design-review");
+            fs.create_directory(
+                &codex_utils_path_uri::PathUri::from_abs_path(&capability_dir),
+                codex_exec_server::CreateDirectoryOptions {
+                    recursive: true,
+                    follow_symlinks: true,
+                },
+                /*sandbox*/ None,
+            )
+            .await?;
+            fs.write_file(
+                &codex_utils_path_uri::PathUri::from_abs_path(
+                    &capability_dir.join("CAPABILITY.md"),
+                ),
+                format!("---\ntags: [frontend]\n---\n\n{CAPABILITY_BODY}\n").into_bytes(),
+                Default::default(),
+                /*sandbox*/ None,
+            )
+            .await?;
+
+            let skill_dir = cwd.join(".agents/skills/design-review-skill");
+            fs.create_directory(
+                &codex_utils_path_uri::PathUri::from_abs_path(&skill_dir),
+                codex_exec_server::CreateDirectoryOptions {
+                    recursive: true,
+                    follow_symlinks: true,
+                },
+                /*sandbox*/ None,
+            )
+            .await?;
+            fs.write_file(
+                &codex_utils_path_uri::PathUri::from_abs_path(&skill_dir.join("SKILL.md")),
+                format!(
+                    "---\nname: design-review-skill\ndescription: {SKILL_DESCRIPTION}\nmetadata:\n  tags: [frontend]\n---\n\n{SKILL_BODY}\n"
+                )
+                .into_bytes(),
+                Default::default(),
+                /*sandbox*/ None,
+            )
+            .await?;
+            Ok(())
+        })
+        .with_config(move |config| {
+            config.include_skill_instructions = true;
+            config.model_provider = model_provider;
+            config.model_auto_compact_token_limit = Some(200_000);
+            config.compact_prompt = Some(SUMMARIZATION_PROMPT.to_string());
+            trust_discovered_hooks(config);
+        })
+        .build(&server)
+        .await?;
+
+    test.submit_turn("Use $design-review-skill to review this change.")
+        .await?;
+
+    let requests = request_log.requests();
+    assert_eq!(
+        requests.len(),
+        3,
+        "expected initial, compact, and continuation requests"
+    );
+    assert!(
+        requests[1].body_contains_text(SUMMARIZATION_PROMPT),
+        "the second outbound request must be the automatic compaction request"
+    );
+
+    let continuation_developer_text = requests[2].message_input_texts("developer").join("\n");
+    assert_eq!(
+        continuation_developer_text
+            .matches("<capex_capability>Capability design-review:\n")
+            .count(),
+        1,
+        "the immediate post-compaction request must contain exactly one capability block: {continuation_developer_text}"
+    );
+    assert!(
+        continuation_developer_text.contains(CAPABILITY_BODY),
+        "the immediate post-compaction request must contain the granted capability body: {continuation_developer_text}"
+    );
+    assert!(
+        continuation_developer_text.contains(&format!("design-review-skill: {SKILL_DESCRIPTION}")),
+        "the immediate post-compaction request must reveal the currently eligible tagged skill metadata: {continuation_developer_text}"
     );
 
     Ok(())

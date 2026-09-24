@@ -32,6 +32,7 @@ fn make_skill(name: &str, path: &str) -> SkillMetadata {
         name: name.to_string(),
         description: format!("{name} skill"),
         short_description: None,
+        tags: Vec::new(),
         interface: None,
         dependencies: None,
         policy: None,
@@ -238,6 +239,98 @@ fn collect_explicit_skill_mentions_skips_ambiguous_name() {
     let selected = collect_mentions(&inputs, &skills, &HashSet::new(), &connector_counts);
 
     assert_eq!(selected, Vec::new());
+}
+
+#[test]
+fn availability_filter_resolves_name_against_available_skills_only() {
+    let mut available = make_skill("demo-skill", "/tmp/available-demo");
+    available.tags = vec!["frontend".to_string()];
+    let mut gated = make_skill("demo-skill", "/tmp/gated-demo");
+    gated.tags = vec!["backend".to_string()];
+    let skills = vec![available.clone(), gated];
+    let inputs = vec![UserInput::Text {
+        text: "use $demo-skill".to_string(),
+        text_elements: Vec::new(),
+    }];
+    let lookup = TestLookup {
+        skills,
+        ..Default::default()
+    };
+
+    let result = collect_explicit_skill_mentions_with_availability(
+        &inputs,
+        &lookup,
+        &HashMap::new(),
+        |skill| skill.tags.iter().any(|tag| tag == "frontend"),
+    );
+
+    assert_eq!(result.selected, vec![available]);
+    assert!(result.unavailable_skill_names.is_empty());
+}
+
+#[test]
+fn availability_filter_reports_gated_text_and_structured_references() {
+    let mut gated = make_skill("gated-skill", "/tmp/gated-skill/SKILL.md");
+    gated.tags = vec!["backend".to_string()];
+    let lookup = TestLookup {
+        skills: vec![gated],
+        ..Default::default()
+    };
+    let is_available = |skill: &SkillMetadata| skill.tags.iter().any(|tag| tag == "frontend");
+
+    let text_result = collect_explicit_skill_mentions_with_availability(
+        &[UserInput::Text {
+            text: "use $gated-skill".to_string(),
+            text_elements: Vec::new(),
+        }],
+        &lookup,
+        &HashMap::new(),
+        is_available,
+    );
+    assert!(text_result.selected.is_empty());
+    assert_eq!(text_result.unavailable_skill_names, vec!["gated-skill"]);
+
+    let structured_result = collect_explicit_skill_mentions_with_availability(
+        &[UserInput::Skill {
+            name: "gated-skill".to_string(),
+            path: test_path_buf("/tmp/gated-skill/SKILL.md"),
+        }],
+        &lookup,
+        &HashMap::new(),
+        |skill| skill.tags.iter().any(|tag| tag == "frontend"),
+    );
+    assert!(structured_result.selected.is_empty());
+    assert_eq!(
+        structured_result.unavailable_skill_names,
+        vec!["gated-skill"]
+    );
+}
+
+#[test]
+fn legacy_explicit_skill_resolver_keeps_mode_off_ambiguity_behavior() {
+    let mut available = make_skill("demo-skill", "/tmp/available-demo");
+    available.tags = vec!["frontend".to_string()];
+    let mut gated = make_skill("demo-skill", "/tmp/gated-demo");
+    gated.tags = vec!["backend".to_string()];
+    let lookup = TestLookup {
+        skills: vec![available.clone(), gated],
+        ..Default::default()
+    };
+    let inputs = vec![UserInput::Text {
+        text: "use $demo-skill".to_string(),
+        text_elements: Vec::new(),
+    }];
+
+    // The existing API has no capability predicate and retains its former behavior.
+    assert!(collect_explicit_skill_mentions(&inputs, &lookup, &HashMap::new()).is_empty());
+
+    let enabled = collect_explicit_skill_mentions_with_availability(
+        &inputs,
+        &lookup,
+        &HashMap::new(),
+        |skill| skill.tags.iter().any(|tag| tag == "frontend"),
+    );
+    assert_eq!(enabled.selected, vec![available]);
 }
 
 #[test]

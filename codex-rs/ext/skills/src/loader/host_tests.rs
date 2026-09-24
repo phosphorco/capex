@@ -107,7 +107,7 @@ async fn loads_host_frontmatter_dependencies_and_policy() {
     let skill_path = write_skill(
         &root,
         "demo",
-        "name: demo\ndescription: Demo skill\nmetadata:\n  short-description: Short demo",
+        "name: demo\ndescription: Demo skill\nmetadata:\n  short-description: Short demo\n  tags: [engineering, frontend]",
     );
     write_metadata(
         &root,
@@ -134,6 +134,7 @@ policy:
             name: "demo".to_string(),
             description: "Demo skill".to_string(),
             short_description: Some("Short demo".to_string()),
+            tags: vec!["engineering".to_string(), "frontend".to_string()],
             interface: None,
             dependencies: Some(SkillDependencies {
                 tools: vec![SkillToolDependency {
@@ -173,6 +174,7 @@ async fn invalid_optional_metadata_fails_open() {
             name: "demo".to_string(),
             description: "Demo skill".to_string(),
             short_description: None,
+            tags: Vec::new(),
             interface: None,
             dependencies: None,
             policy: None,
@@ -212,6 +214,7 @@ async fn loads_host_interface_metadata_and_local_asset_paths() {
             name: "demo".to_string(),
             description: "Demo skill".to_string(),
             short_description: None,
+            tags: Vec::new(),
             interface: Some(SkillInterface {
                 display_name: Some("Demo".to_string()),
                 short_description: Some("Interface summary".to_string()),
@@ -251,6 +254,7 @@ async fn loads_plugin_skill_interface_icons_from_local_and_shared_assets() {
             name: "plugin:send-message".to_string(),
             description: "Send messages".to_string(),
             short_description: None,
+            tags: Vec::new(),
             interface: Some(SkillInterface {
                 display_name: None,
                 short_description: None,
@@ -293,6 +297,7 @@ async fn rejects_plugin_skill_interface_icons_outside_shared_assets() {
             name: "plugin:send-message".to_string(),
             description: "Send messages".to_string(),
             short_description: None,
+            tags: Vec::new(),
             interface: Some(SkillInterface {
                 display_name: Some("Send Message".to_string()),
                 short_description: None,
@@ -330,6 +335,7 @@ async fn rejects_interface_fields_that_escape_or_fail_validation() {
             name: "demo".to_string(),
             description: "Demo skill".to_string(),
             short_description: None,
+            tags: Vec::new(),
             interface: None,
             dependencies: None,
             policy: None,
@@ -380,6 +386,7 @@ async fn discovers_nested_plugin_namespace_without_plugin_identity() {
             name: "plugin-name:demo".to_string(),
             description: "Demo skill".to_string(),
             short_description: None,
+            tags: Vec::new(),
             interface: None,
             dependencies: None,
             policy: None,
@@ -425,6 +432,7 @@ async fn plugin_root_accepts_maximum_length_qualified_skill_name() {
             name: format!("{plugin_namespace}:{skill_name}"),
             description: "Search skill".to_string(),
             short_description: None,
+            tags: Vec::new(),
             interface: None,
             dependencies: None,
             policy: None,
@@ -519,6 +527,7 @@ async fn recursive_plugin_root_preserves_owner_namespace_and_shared_asset_policy
             name: "plugin:demo".to_string(),
             description: "Demo skill".to_string(),
             short_description: None,
+            tags: Vec::new(),
             interface: Some(SkillInterface {
                 display_name: None,
                 short_description: None,
@@ -578,6 +587,7 @@ async fn direct_child_plugin_root_ignores_nested_skills() {
             name: "plugin:direct".to_string(),
             description: "Direct skill".to_string(),
             short_description: None,
+            tags: Vec::new(),
             interface: None,
             dependencies: None,
             policy: None,
@@ -659,6 +669,7 @@ async fn recursive_plugin_root_preserves_symlinked_skill_discovery_path() {
             name: "plugin:demo".to_string(),
             description: "Symlinked skill".to_string(),
             short_description: None,
+            tags: Vec::new(),
             interface: None,
             dependencies: None,
             policy: None,

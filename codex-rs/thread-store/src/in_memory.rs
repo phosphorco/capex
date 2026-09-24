@@ -181,6 +181,7 @@ mod tests {
                     multi_agent_version: None,
                     history_mode: ThreadHistoryMode::Legacy,
                     history_base: None,
+                    forked_from_ordinal_exclusive: None,
                     subagent_history_start_ordinal: None,
                     initial_window_id: uuid::Uuid::now_v7().to_string(),
                     runtime_workspace_roots: None,
@@ -477,6 +478,7 @@ mod tests {
             multi_agent_version: None,
             history_mode,
             history_base: None,
+            forked_from_ordinal_exclusive: None,
             subagent_history_start_ordinal: None,
             initial_window_id: uuid::Uuid::now_v7().to_string(),
             runtime_workspace_roots: None,
@@ -622,6 +624,11 @@ impl InMemoryThreadStore {
                 .then_some("disabled".to_string()),
             history_mode: params.history_mode,
             history_base: params.history_base,
+            forked_from_ordinal_exclusive: params.forked_from_id.and(
+                params
+                    .forked_from_ordinal_exclusive
+                    .or_else(|| params.history_base.map(|base| base.end_ordinal_exclusive)),
+            ),
             subagent_history_start_ordinal: params.subagent_history_start_ordinal,
             multi_agent_version: params.multi_agent_version,
             context_window: Some(SessionContextWindow::new(params.initial_window_id.clone())),

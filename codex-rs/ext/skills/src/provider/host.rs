@@ -137,6 +137,7 @@ fn catalog_entry_from_skill(skill: &SkillMetadata, enabled: bool) -> SkillCatalo
         SkillResourceId::new(skill_path),
     )
     .with_short_description(skill.short_description.clone())
+    .with_tags(skill.tags.clone())
     .with_display_path(display_path)
     .with_prompt_scope(skill.scope)
     .with_dependencies(skill.dependencies.clone());

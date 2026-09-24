@@ -298,6 +298,7 @@ fn catalog_entry_from_skill(
         main_prompt,
     )
     .with_short_description(skill.short_description.clone())
+    .with_tags(skill.tags.clone())
     .with_display_path(main_resource)
     .with_alias_root(alias_root)
     .with_dependencies(skill.dependencies.clone());

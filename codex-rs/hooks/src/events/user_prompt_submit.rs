@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::HookCompletedEvent;
 use codex_protocol::protocol::HookEventName;
+use codex_protocol::protocol::HookExecutionMode;
 use codex_protocol::protocol::HookOutputEntry;
 use codex_protocol::protocol::HookOutputEntryKind;
 use codex_protocol::protocol::HookRunStatus;
@@ -38,6 +39,7 @@ pub struct UserPromptSubmitOutcome {
     pub should_stop: bool,
     pub stop_reason: Option<String>,
     pub additional_contexts: Vec<String>,
+    pub capability_grants: Vec<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -45,6 +47,7 @@ struct UserPromptSubmitHandlerData {
     should_stop: bool,
     stop_reason: Option<String>,
     additional_contexts_for_model: Vec<AdditionalContext>,
+    capability_grants: Vec<String>,
 }
 
 pub(crate) fn preview(
@@ -76,6 +79,7 @@ pub(crate) async fn run(
             should_stop: false,
             stop_reason: None,
             additional_contexts: Vec::new(),
+            capability_grants: Vec::new(),
         };
     }
 
@@ -126,12 +130,17 @@ pub(crate) async fn run(
         .output_spiller()
         .maybe_spill_additional_contexts(additional_contexts)
         .await;
+    let capability_grants = results
+        .iter()
+        .flat_map(|result| result.data.capability_grants.iter().cloned())
+        .collect();
 
     UserPromptSubmitOutcome {
         hook_events: results.into_iter().map(|result| result.completed).collect(),
         should_stop,
         stop_reason,
         additional_contexts,
+        capability_grants,
     }
 }
 
@@ -145,6 +154,7 @@ fn parse_completed(
     let mut should_stop = false;
     let mut stop_reason = None;
     let mut additional_contexts_for_model = Vec::new();
+    let mut capability_grants = Vec::new();
 
     match run_result.error.as_deref() {
         Some(error) => {
@@ -161,6 +171,16 @@ fn parse_completed(
                 } else if let Some(parsed) =
                     output_parser::parse_user_prompt_submit(&run_result.stdout)
                 {
+                    if !parsed.capability_grants.is_empty() {
+                        if handler.execution_mode() == HookExecutionMode::Async {
+                            entries.push(HookOutputEntry {
+                                kind: HookOutputEntryKind::Warning,
+                                text: "CapEx grants are ignored for asynchronous hooks".to_string(),
+                            });
+                        } else if parsed.invalid_block_reason.is_none() {
+                            capability_grants.extend(parsed.capability_grants.iter().cloned());
+                        }
+                    }
                     if let Some(system_message) = parsed.universal.system_message {
                         entries.push(HookOutputEntry {
                             kind: HookOutputEntryKind::Warning,
@@ -269,6 +289,7 @@ fn parse_completed(
             should_stop,
             stop_reason,
             additional_contexts_for_model,
+            capability_grants,
         },
         completion_order: 0,
     }
@@ -280,6 +301,7 @@ fn serialization_failure_outcome(hook_events: Vec<HookCompletedEvent>) -> UserPr
         should_stop: false,
         stop_reason: None,
         additional_contexts: Vec::new(),
+        capability_grants: Vec::new(),
     }
 }
 
@@ -320,6 +342,7 @@ mod tests {
                     text: "do not inject".to_string(),
                     limit: Default::default(),
                 }],
+                capability_grants: Vec::new(),
             }
         );
         assert_eq!(parsed.completed.run.status, HookRunStatus::Stopped);
@@ -344,7 +367,7 @@ mod tests {
             &handler(),
             run_result(
                 Some(0),
-                r#"{"decision":"block","reason":"slow down","hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"do not inject"}}"#,
+                r#"{"decision":"block","reason":"slow down","capex":{"grant":["frontend"]},"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"do not inject"}}"#,
                 "",
             ),
             Some("turn-1".to_string()),
@@ -359,6 +382,7 @@ mod tests {
                     text: "do not inject".to_string(),
                     limit: Default::default(),
                 }],
+                capability_grants: vec!["frontend".to_string()],
             }
         );
         assert_eq!(parsed.completed.run.status, HookRunStatus::Blocked);
@@ -379,7 +403,7 @@ mod tests {
 
     #[test]
     fn claude_block_decision_requires_reason() {
-        let stdout = r#"{"decision":"block","hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"do not inject"}}"#;
+        let stdout = r#"{"decision":"block","capex":{"grant":["frontend"]},"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"do not inject"}}"#;
         let parsed = parse_completed(
             &handler(),
             run_result(Some(0), stdout, ""),
@@ -392,6 +416,7 @@ mod tests {
                 should_stop: false,
                 stop_reason: None,
                 additional_contexts_for_model: Vec::new(),
+                capability_grants: Vec::new(),
             }
         );
         assert_eq!(parsed.completed.run.status, HookRunStatus::Failed);
@@ -413,10 +438,43 @@ mod tests {
         assert_eq!(parsed.completed.run.status, HookRunStatus::Completed);
         assert_eq!(
             parsed.completed.run.entries,
+            vec![
+                HookOutputEntry {
+                    kind: HookOutputEntryKind::Warning,
+                    text: "CapEx grants are ignored for asynchronous hooks".to_string(),
+                },
+                HookOutputEntry {
+                    kind: HookOutputEntryKind::Context,
+                    text: "do not inject".to_string(),
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn asynchronous_capex_grants_are_ignored_and_reported() {
+        let parsed = parse_completed(
+            &handler_with_async(/*async*/ true),
+            run_result(Some(0), r#"{"capex":{"grant":["frontend"]}}"#, ""),
+            Some("turn-1".to_string()),
+        );
+
+        assert_eq!(
+            parsed.data,
+            UserPromptSubmitHandlerData {
+                should_stop: false,
+                stop_reason: None,
+                additional_contexts_for_model: Vec::new(),
+                capability_grants: Vec::new(),
+            }
+        );
+        assert_eq!(parsed.completed.run.status, HookRunStatus::Completed);
+        assert_eq!(
+            parsed.completed.run.entries,
             vec![HookOutputEntry {
-                kind: HookOutputEntryKind::Context,
-                text: "do not inject".to_string(),
-            }],
+                kind: HookOutputEntryKind::Warning,
+                text: "CapEx grants are ignored for asynchronous hooks".to_string(),
+            }]
         );
     }
 
@@ -434,6 +492,7 @@ mod tests {
                 should_stop: true,
                 stop_reason: Some("blocked by policy".to_string()),
                 additional_contexts_for_model: Vec::new(),
+                capability_grants: Vec::new(),
             }
         );
         assert_eq!(parsed.completed.run.status, HookRunStatus::Blocked);

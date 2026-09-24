@@ -1,0 +1,88 @@
+amends "workbench:plan"
+
+meta {
+  title = "Build and verify the smallest CapEx implementation"
+  goal = "Deliver session-scoped capability grants and immediate skill reveal while proving native Codex and CapEx can continue each other's sessions in shared storage, including compaction. Publication is not authorized."
+}
+
+local contract = new Action {
+  id = "v1-contract"
+  owner = "planner"
+  outcome = "Record the minimal v1 behavior, explicit simplifications, lifecycle rules, and acceptance map in capex-v1.md."
+  grant { "capex-v1.md" }
+  oracle = module.adjudicated("Contract matches the simplest-version proposal; explicitly covers filtering, hook boundaries, persisted grants, compaction, resume, fork, clear, child isolation, disabled skills, and monotonic applicability. Proposed defaults are not misrepresented as user rulings. Every delivery increment has observable acceptance.", "planner")
+}
+
+local source = new Guard {
+  id = "source-contracts"
+  owner = "implementer"
+  outcome = "Identify an immutable intended Codex base and inspect actual discovery, hook, request, replay, compaction, fork, and child contracts and test harnesses. Record repository/revision, exact paths, constraints, and evidence in the ledger. If the intended base cannot be determined, ask Cole for that input before selecting a different source."
+  observes { "capex-design.md"; "capex-v1.md"; "selected Codex source revision and repository instructions" }
+  needs { module.produced(contract); module.verified(contract) }
+  oracle = module.adjudicated("Evidence identifies an immutable repository revision, exact producer/consumer paths and required checks; demonstrates which persisted extension points and request boundaries exist; addresses fork cutoff and child history behavior. Missing source or an uninspected hook/compaction assumption cannot pass.", "implementer")
+}
+
+local persistence = new Guard {
+  id = "jsonl-compatibility"
+  owner = "implementer"
+  outcome = "Observe native 0.156.1 and patched CapEx each opening and continuing both session origins in the same temporary CODEX_HOME, including compaction by either runtime and a CapEx prepared fork child cold-resumed by native, with sidecar-only grants and no incompatible JSONL or shared-index changes."
+  observes { "session JSONL and state DB/indexes"; "native 0.156.1 and patched binaries"; "CapEx sidecar" }
+  needs { module.verified(catalog); module.verified(hooks); module.verified(state); module.verified(runtime) }
+  oracle = module.adjudicated("For the pinned native version, actual serial two-way binary round trips using a binary rebuilt after the latest runtime fixes succeed on shared temporary storage; every emitted JSONL line uses an existing shape accepted and rewritten by both; no new rollout variant or field is present; native and CapEx compaction both permit CapEx to restore exact sidecar grants before the next request without duplicates. A CapEx prepared fork persists a self-contained sanitized child with its existing logical-cutoff metadata; native cold-resumes and continues that child, then CapEx resumes it with the exact child sidecar selection. Native-compacted historical forks, arbitrary future native versions, and simultaneous concurrent writers remain explicitly unproved. Unit serde tests or source inference alone cannot pass.", "implementer")
+}
+
+local route = new Action {
+  id = "delivery-graph"
+  owner = "planner"
+  outcome = "Maintain this source-grounded implementation and verification graph, including the shared-storage compatibility gate."
+  grant { "capex.plan.pkl" }
+  needs { module.produced(contract); module.verified(contract); module.verified(source) }
+  oracle = module.adjudicated("The graph names bounded source footprints and relevant test oracles; JSONL compatibility is gated on an actual native/CapEx shared-storage round trip; `workbench plan check` passes. Implementation is now authorized, publication is not.", "planner")
+}
+
+local catalog = new Action {
+  id = "catalog-selection"
+  owner = "implementer"
+  outcome = "Parse capability/skill tags and filter model, explicit-invocation, and model-tool skill catalogs without changing mode-off behavior."
+  grant { "codex-rs/skills/src"; "codex-rs/ext/skills/src" }
+  needs { module.verified(route) }
+  oracle = module.adjudicated("`just test -p codex-skills` and `just test -p codex-skills-extension` pass; gated/untagged/excluded and otherwise disabled skills remain unavailable, later grants reveal raw cached entries, the experimental shadow selector does not receive hidden host skills, and mode off preserves native behavior. The app-server picker limitation is explicitly documented.", "implementer")
+}
+
+local hooks = new Action {
+  id = "hook-grants"
+  owner = "implementer"
+  outcome = "Accept grants only from successful synchronous SessionStart and UserPromptSubmit hook envelopes, preserving stop and block semantics."
+  grant { "codex-rs/hooks/src"; "codex-rs/hooks/schema/generated" }
+  needs { module.verified(route) }
+  oracle = module.adjudicated("`just test -p codex-hooks` passes; malformed, failed, and async results do not grant; schema fixtures match; stop/block behavior is retained.", "implementer")
+}
+
+local state = new Action {
+  id = "sidecar-state"
+  owner = "implementer"
+  outcome = "Persist bounded capability snapshots atomically outside rollouts and recover across fresh, clear, resume, and cutoff forks without grants from untrusted text."
+  grant { "codex-rs/core/src/capex_state" }
+  needs { module.verified(route) }
+  oracle = module.adjudicated("State tests pass for lazy resume snapshots, failed writes, clear, missing/corrupt fallback, deduplication, and exact empty/nonempty fork snapshots; no rollout JSONL shape is changed by grant storage.", "implementer")
+}
+
+local runtime = new Action {
+  id = "runtime-reveal"
+  owner = "implementer"
+  outcome = "Wire hook grants and sidecar state into next-request capability instructions and skill metadata, including compaction reconstruction and explicit skill gating."
+  grant { "codex-rs/core/src/capex.rs"; "codex-rs/core/src/context"; "codex-rs/core/src/hook_runtime.rs"; "codex-rs/core/src/session"; "codex-rs/core/tests/suite/hooks.rs" }
+  needs { module.verified(route); module.produced(catalog); module.produced(hooks); module.produced(state) }
+  oracle = module.adjudicated("`just test -p codex-core` passes relevant integration cases asserting outbound request contents after synchronous grant, resume, and compaction; spawned non-root children have no inherited parent-only CapEx instruction even when their fork history contains it; an explicitly invoked skill newly revealed by a synchronous hook has its required MCP servers and tools on the immediate request; hidden duplicate names do not block a visible skill's explicit invocation and gated explicit references report unavailability; developer fragments are bounded and rollout-compatible; duplicate re-injection and explicit skill bypass are absent.", "implementer")
+}
+
+local review = new Guard {
+  id = "route-review"
+  owner = "planner"
+  outcome = "Review delivered v1 against the contract and all unresolved compatibility limits before claiming completion."
+  observes { "capex-v1.md"; "capex-constraints.md"; "capex.plan.pkl"; "capex.ledger.jsonl" }
+  needs { module.verified(persistence); module.verified(catalog); module.verified(hooks); module.verified(state); module.verified(runtime) }
+  oracle = module.adjudicated("Immediate latent reveal includes hook-granted MCP-dependent skills on the first request; spawned child agents do not inherit parent-only dynamic capability guidance; explicit name resolution excludes gated duplicates and reports unavailable references, shadow selection does not leak hidden skills; monotonic grants, compaction/restart reconstruction, selection consistency, and both-way shared-storage compatibility are evidenced against the final build; all remaining picker/fork/decay limits are disclosed and do not contradict the accepted v1 scope.", "planner")
+}
+
+nodes { contract; source; route; catalog; hooks; state; runtime; persistence; review }

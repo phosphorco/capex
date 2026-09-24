@@ -41,6 +41,7 @@ const CONTEXTUAL_DEVELOPER_PREFIXES: &[&str] = &[
     "<permissions instructions>",
     APPROVED_COMMAND_PREFIX_SAVED_MESSAGE_PREFIX,
     "<model_switch>",
+    "<capex_capability>",
     "<managed_developer_instructions>",
     "<persistent_mode>",
     APPS_INSTRUCTIONS_OPEN_TAG,

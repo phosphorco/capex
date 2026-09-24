@@ -107,6 +107,9 @@ pub struct CreateThreadParams {
     pub history_mode: ThreadHistoryMode,
     /// Exclusive prefix of another paginated rollout inherited by this thread.
     pub history_base: Option<HistoryPosition>,
+    /// Logical cutoff in the parent thread, even when history is copied locally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from_ordinal_exclusive: Option<u64>,
     /// First rollout ordinal that belongs to this subagent's projected history.
     pub subagent_history_start_ordinal: Option<u64>,
     /// Initial context-window identity captured when the thread was created.

@@ -15,6 +15,7 @@ use crate::context::ContextualUserFragment;
 use crate::context::UserVerificationNotice;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::feedback_tags;
+use crate::hook_runtime::apply_capability_grants;
 use crate::hook_runtime::drain_async_hook_results;
 use crate::hook_runtime::inspect_pending_input;
 use crate::hook_runtime::record_additional_contexts;
@@ -111,7 +112,7 @@ use codex_protocol::user_input::UserInput;
 use codex_skills::ToolMentionKind;
 use codex_skills::app_id_from_path;
 use codex_skills::build_skill_name_counts;
-use codex_skills::collect_explicit_skill_mentions;
+use codex_skills::collect_explicit_skill_mentions_with_availability;
 use codex_skills::tool_kind_for_path;
 use codex_skills_extension::HostSkillPrompts;
 use codex_skills_extension::InjectedHostSkillPrompts;
@@ -228,6 +229,13 @@ pub(crate) async fn run_turn(
         required_servers,
         required_plugins,
     } = mcp_startup_requirements;
+
+    // Startup grants can reveal skills whose dependencies are needed to prepare
+    // this request, so resolve them before collecting the initial requirements.
+    if run_pending_session_start_hooks(&sess, &turn_context).await {
+        return Ok(None);
+    }
+
     if allow_plugin_mentions {
         required_plugins.extend(crate::plugins::collect_explicit_plugin_ids(&user_input));
     }
@@ -255,12 +263,12 @@ pub(crate) async fn run_turn(
     required_servers.dedup();
 
     // run_turn owns the step used to seed context and make the first sampling request.
-    let first_step_context = match sess
+    let mut first_step_context = match sess
         .capture_step_context_with_required_mcp_servers(
             Arc::clone(&turn_context),
             &cancellation_token,
-            required_servers,
-            required_plugins,
+            &required_servers,
+            &required_plugins,
         )
         .await
     {
@@ -305,21 +313,6 @@ pub(crate) async fn run_turn(
     );
     let mut world_state = world_state?;
 
-    let Some((injection_items, explicitly_enabled_connectors)) = build_skills_and_plugins(
-        &sess,
-        first_step_context.as_ref(),
-        &user_input,
-        &mentioned_plugins,
-        &cancellation_token,
-    )
-    .await
-    else {
-        return Ok(None);
-    };
-
-    if run_pending_session_start_hooks(&sess, &turn_context).await {
-        return Ok(None);
-    }
     if crate::guardian::is_basic_session_source(&turn_context.session_source)
         && let Err(error) = crate::guardian::finalize_guardian_input(
             &sess,
@@ -351,6 +344,9 @@ pub(crate) async fn run_turn(
             CompactionPhase::PreTurn,
         )
         .await?;
+        if run_pending_session_start_hooks(&sess, &turn_context).await {
+            return Ok(None);
+        }
         world_state = sess
             .record_context_updates_and_set_reference_context_item(first_step_context.as_ref())
             .await?;
@@ -374,6 +370,51 @@ pub(crate) async fn run_turn(
     {
         return Ok(None);
     }
+
+    // Prompt-submit hooks may reveal a skill with MCP dependencies after the
+    // initial StepContext was captured. Add those servers before constructing
+    // skill injections and the first model request.
+    if sess
+        .services
+        .thread_extension_data
+        .get::<crate::capex::CapexRuntime>()
+        .is_some()
+    {
+        let required_server_count = required_servers.len();
+        let (post_hook_required_servers, _) =
+            required_mcp_servers_for_input(&sess, turn_context.as_ref(), &user_input)
+                .or_cancel(&cancellation_token)
+                .await?;
+        required_servers.extend(post_hook_required_servers);
+        required_servers.sort_unstable();
+        required_servers.dedup();
+        if required_servers.len() != required_server_count {
+            first_step_context = sess
+                .capture_step_context_with_required_mcp_servers(
+                    Arc::clone(&turn_context),
+                    &cancellation_token,
+                    &required_servers,
+                    &required_plugins,
+                )
+                .await?;
+            world_state = sess
+                .record_context_updates_and_set_reference_context_item(first_step_context.as_ref())
+                .await?;
+        }
+    }
+
+    // Prompt-submit hooks may reveal a skill needed by this same request.
+    let Some((injection_items, explicitly_enabled_connectors)) = build_skills_and_plugins(
+        &sess,
+        first_step_context.as_ref(),
+        &user_input,
+        &mentioned_plugins,
+        &cancellation_token,
+    )
+    .await
+    else {
+        return Ok(None);
+    };
 
     // Only speculate after hooks accept the turn, using its finalized tools and permissions.
     {
@@ -857,6 +898,7 @@ pub(crate) async fn run_hooks_and_record_inputs(
     let mut accepted_user_input = false;
     for input_item in input {
         let hook_outcome = inspect_pending_input(sess, turn_context, input_item).await;
+        apply_capability_grants(sess, turn_context, hook_outcome.capability_grants).await;
         if hook_outcome.should_stop {
             blocked_input = true;
             record_additional_contexts(sess, turn_context, hook_outcome.additional_contexts).await;
@@ -976,8 +1018,21 @@ async fn required_mcp_servers_for_input(
     };
     let skills_snapshot = turn_context.skills_snapshot();
     let skills_outcome = skills_snapshot.outcome();
-    let mentioned_skills =
-        collect_explicit_skill_mentions(user_input, skills_outcome, &connector_slug_counts);
+    let capex = sess
+        .services
+        .thread_extension_data
+        .get::<crate::capex::CapexRuntime>();
+    let skill_mentions = collect_explicit_skill_mentions_with_availability(
+        user_input,
+        skills_outcome,
+        &connector_slug_counts,
+        |skill| {
+            capex
+                .as_ref()
+                .is_none_or(|capex| capex.skill_is_available(skill))
+        },
+    );
+    let mentioned_skills = skill_mentions.selected.into_iter();
     for skill in mentioned_skills {
         if let Some(dependencies) = skill.dependencies {
             required_servers.extend(
@@ -1051,10 +1106,42 @@ async fn build_skills_and_plugins(
     let extension_injection_items =
         build_extension_turn_input_items(sess, step_context, user_input, cancellation_token)
             .await?;
+    let capex = sess
+        .services
+        .thread_extension_data
+        .get::<crate::capex::CapexRuntime>();
+    let available_skills = skills_outcome
+        .skills
+        .iter()
+        .filter(|skill| {
+            capex
+                .as_ref()
+                .is_none_or(|capex| capex.skill_is_available(skill))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
     let skill_name_counts_lower =
-        build_skill_name_counts(&skills_outcome.skills, &skills_outcome.disabled_paths).1;
-    let mentioned_skills =
-        collect_explicit_skill_mentions(user_input, skills_outcome, &connector_slug_counts);
+        build_skill_name_counts(&available_skills, &skills_outcome.disabled_paths).1;
+    let skill_mentions = collect_explicit_skill_mentions_with_availability(
+        user_input,
+        skills_outcome,
+        &connector_slug_counts,
+        |skill| {
+            capex
+                .as_ref()
+                .is_none_or(|capex| capex.skill_is_available(skill))
+        },
+    );
+    for name in skill_mentions.unavailable_skill_names {
+        sess.send_event(
+            turn_context,
+            EventMsg::Warning(WarningEvent {
+                message: format!("Skill `${name}` is unavailable in this session."),
+            }),
+        )
+        .await;
+    }
+    let mentioned_skills = skill_mentions.selected;
     maybe_prompt_and_install_mcp_dependencies(
         sess,
         turn_context,

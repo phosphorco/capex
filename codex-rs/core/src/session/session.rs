@@ -780,6 +780,23 @@ impl Session {
                 .model(),
             session_configuration.provider
         );
+        let referenced_fork_ordinal_exclusive = match &fork_persistence {
+            ForkPersistence::Referenced { history_base, .. } => {
+                history_base.map(|position| position.end_ordinal_exclusive)
+            }
+            ForkPersistence::Copied | ForkPersistence::CopiedDeferred => None,
+        };
+        let capex_referenced_fork = std::env::var("CAPEX_CAPABILITY_MODE").as_deref() == Ok("1")
+            && matches!(&initial_history, InitialHistory::Forked(_))
+            && matches!(&fork_persistence, ForkPersistence::Referenced { .. });
+        let fork_persistence = if capex_referenced_fork {
+            // Scrubbed fork history must be written into the child rollout. A reference-backed
+            // fork would keep the unsanitized source prefix behind history_base and its inherited
+            // item count would no longer match the scrubbed in-memory prefix.
+            ForkPersistence::Copied
+        } else {
+            fork_persistence
+        };
         let base_instructions_provenance = if config.base_instructions.is_some() {
             Some(
                 config
@@ -809,25 +826,29 @@ impl Session {
             ForkPersistence::Referenced { history_base, .. } => {
                 history_base.map(|position| position.end_ordinal_exclusive)
             }
-            ForkPersistence::Copied | ForkPersistence::CopiedDeferred => match &initial_history {
-                InitialHistory::Resumed(resumed) => {
-                    // Both local and CCA thread stores place the resumed thread's
-                    // canonical SessionMeta first. Never inspect inherited metadata:
-                    // an ancestor's history_base describes a different fork boundary.
-                    resumed.history.first().and_then(|item| match item {
-                        RolloutItem::SessionMeta(meta)
-                            if meta.meta.id == resumed.conversation_id =>
-                        {
-                            codex_rollout::forked_from_ordinal_exclusive(
-                                &meta.meta,
-                                resumed.rollout_path.as_deref(),
-                            )
-                        }
-                        _ => None,
-                    })
-                }
-                InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => None,
-            },
+            ForkPersistence::Copied | ForkPersistence::CopiedDeferred => {
+                referenced_fork_ordinal_exclusive.or_else(|| match &initial_history {
+                    InitialHistory::Resumed(resumed) => {
+                        // Both local and CCA thread stores place the resumed thread's
+                        // canonical SessionMeta first. Never inspect inherited metadata:
+                        // an ancestor's history_base describes a different fork boundary.
+                        resumed.history.first().and_then(|item| match item {
+                            RolloutItem::SessionMeta(meta)
+                                if meta.meta.id == resumed.conversation_id =>
+                            {
+                                codex_rollout::forked_from_ordinal_exclusive(
+                                    &meta.meta,
+                                    resumed.rollout_path.as_deref(),
+                                )
+                            }
+                            _ => None,
+                        })
+                    }
+                    InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => {
+                        None
+                    }
+                })
+            }
         }
         .filter(|_| forked_from_id.is_some());
         let parent_thread_id = session_configuration
@@ -924,6 +945,25 @@ impl Session {
                     checkpoint.previous_window_id = None;
                     checkpoint.window_id = Some(child_window_id.clone());
                 }
+            }
+        }
+        // A spawned agent must not persist CapEx guidance copied from its parent. In
+        // particular, paginated children snapshot their inherited model context when
+        // thread persistence starts below, before the runtime sidecar is loaded.
+        // Root forks are scrubbed later, after their sidecar has been seeded from the
+        // selected cutoff, so their inherited guidance still matches that cutoff.
+        if std::env::var("CAPEX_CAPABILITY_MODE").as_deref() == Ok("1")
+            && session_configuration.session_source.is_non_root_agent()
+        {
+            match &mut initial_history {
+                InitialHistory::Forked(items) => scrub_inherited_capex_guidance(items),
+                InitialHistory::Resumed(resumed) => {
+                    // Existing child rollouts may predate child-side prefix scrubbing. Keep
+                    // the stored JSONL intact, but never reconstruct parent grants into the
+                    // model context on a cold resume.
+                    scrub_inherited_capex_guidance(Arc::make_mut(&mut resumed.history));
+                }
+                InitialHistory::New | InitialHistory::Cleared => {}
             }
         }
         let (agent_control, local_agent_runtime): (Arc<dyn AgentControl>, _) = match agent_control {
@@ -1037,6 +1077,7 @@ impl Session {
                                 ForkPersistence::Copied | ForkPersistence::CopiedDeferred => None,
                                 ForkPersistence::Referenced { history_base, .. } => *history_base,
                             },
+                            forked_from_ordinal_exclusive,
                             subagent_history_start_ordinal: None,
                             initial_window_id: initial_auto_compact_window_ids
                                 .window_id
@@ -1646,6 +1687,78 @@ impl Session {
                 }).await;
             }
 
+            let mut capex_fork_seed_failed = false;
+            if !session_configuration.session_source.is_non_root_agent()
+                && let Some(parent_id) = forked_from_id
+            {
+                let fork_items = match &initial_history {
+                    InitialHistory::Forked(items) => Some(items.as_slice()),
+                    // An empty historical prefix is represented as New by the
+                    // thread manager; it must still fork an empty cutoff.
+                    InitialHistory::New => Some(&[][..]),
+                    InitialHistory::Cleared | InitialHistory::Resumed(_) => None,
+                };
+                if let Some(items) = fork_items
+                    && let Err(error) = crate::capex::seed_fork_from_history(
+                        config.codex_home.as_path(),
+                        parent_id,
+                        thread_id,
+                        items,
+                    )
+                {
+                    tracing::warn!("CapEx fork snapshot unavailable: {error}");
+                    capex_fork_seed_failed = true;
+                }
+            }
+            if std::env::var("CAPEX_CAPABILITY_MODE").as_deref() == Ok("1")
+                && let InitialHistory::Forked(items) = &mut initial_history
+            {
+                // Retained prompt-hook markers can outlive their triggering
+                // user message at a fork cutoff. Root forks seed their sidecar
+                // from the selected prefix above; spawned agents start with
+                // their own configured grants. Both paths must rebuild only
+                // the guidance represented by their own sidecar.
+                scrub_inherited_capex_guidance(items);
+            }
+
+            let capex_load_mode = if capex_fork_seed_failed {
+                crate::capex_state::CapabilityStateLoadMode::FailClosed
+            } else {
+                match &initial_history {
+                // A fork whose sidecar is missing must remain empty on later
+                // resumes as well. Otherwise a failed fork seed could silently
+                // fall back to configured initial grants on the next process.
+                InitialHistory::Resumed(_) if forked_from_id.is_some() =>
+                {
+                    crate::capex_state::CapabilityStateLoadMode::FailClosed
+                }
+                InitialHistory::New if forked_from_id.is_some() => {
+                    crate::capex_state::CapabilityStateLoadMode::Resume
+                }
+                InitialHistory::New | InitialHistory::Cleared => {
+                    crate::capex_state::CapabilityStateLoadMode::Fresh
+                }
+                InitialHistory::Resumed(_) | InitialHistory::Forked(_) => {
+                    crate::capex_state::CapabilityStateLoadMode::Resume
+                }
+                }
+            };
+            if let Some(capex) = crate::capex::CapexRuntime::from_environment(
+                config.cwd.as_path(),
+                config.codex_home.as_path(),
+                thread_id,
+                capex_load_mode,
+            )
+            .map_err(anyhow::Error::msg)?
+            {
+                if let Some(skills) =
+                    thread_extension_data.get::<codex_skills_extension::SkillsThreadState>()
+                {
+                    skills.set_capex_filter(Some(capex.skill_tags()));
+                }
+                thread_extension_data.insert(capex);
+            }
+
             let executed_tool_calls = crate::state::ExecutedToolCalls::new(
                 &config.features,
                 &initial_history,
@@ -1924,4 +2037,21 @@ impl Session {
             }
         }
     }
+}
+
+fn scrub_inherited_capex_guidance(items: &mut Vec<RolloutItem>) {
+    items.retain_mut(|item| match item {
+        RolloutItem::ResponseItem(envelope) => {
+            !crate::capex::is_inherited_capex_instruction(&envelope.item)
+        }
+        RolloutItem::Compacted(checkpoint) => {
+            if let Some(replacement_history) = &mut checkpoint.replacement_history {
+                replacement_history.retain(|envelope| {
+                    !crate::capex::is_inherited_capex_instruction(&envelope.item)
+                });
+            }
+            true
+        }
+        _ => true,
+    });
 }

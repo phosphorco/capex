@@ -36,6 +36,7 @@ struct ParsedEnvironmentSkill {
     base_name: String,
     description: String,
     short_description: Option<String>,
+    tags: Vec<String>,
     dependencies: Option<SkillDependencies>,
     policy: Option<SkillPolicy>,
 }
@@ -75,6 +76,7 @@ impl ParsedEnvironmentSkill {
             name: base_name,
             description,
             short_description,
+            tags,
         } = parse_skill_frontmatter_metadata(&contents, || default_skill_name(&skill.path))
             .map_err(|err| err.to_string())?;
         let (dependencies, policy) = match &skill.metadata {
@@ -91,6 +93,7 @@ impl ParsedEnvironmentSkill {
             base_name,
             description,
             short_description,
+            tags,
             dependencies,
             policy,
         })
@@ -176,6 +179,7 @@ pub async fn load_environment_skills_from_root(
                 name,
                 description: skill.description,
                 short_description: skill.short_description,
+                tags: skill.tags,
                 dependencies: skill.dependencies,
                 policy: skill.policy,
             })
@@ -243,6 +247,7 @@ pub fn load_environment_skills_from_discovery(
             name: base_name,
             description,
             short_description,
+            tags,
         } = match parse_skill_frontmatter_metadata(&skill.instructions.contents, || {
             default_skill_name(&skill.instructions.path)
         }) {
@@ -290,6 +295,7 @@ pub fn load_environment_skills_from_discovery(
             name,
             description,
             short_description,
+            tags,
             dependencies,
             policy,
         };

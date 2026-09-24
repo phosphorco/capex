@@ -8,6 +8,21 @@
       ],
       "type": "string"
     },
+    "CapexHookOutputWire": {
+      "additionalProperties": false,
+      "properties": {
+        "grant": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "grant"
+      ],
+      "type": "object"
+    },
     "UserPromptSubmitHookSpecificOutputWire": {
       "additionalProperties": false,
       "properties": {
@@ -27,6 +42,14 @@
     }
   },
   "properties": {
+    "capex": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/CapexHookOutputWire"
+        }
+      ],
+      "default": null
+    },
     "continue": {
       "default": true,
       "type": "boolean"

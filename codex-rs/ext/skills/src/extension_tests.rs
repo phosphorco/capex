@@ -69,3 +69,63 @@ fn empty_catalog_records_zero_metrics_without_a_fragment() {
         ]
     );
 }
+
+#[test]
+fn shadow_selection_catalog_refilters_raw_host_skills_after_merge() {
+    let thread_state = SkillsThreadState::new(
+        SkillsExtensionConfig {
+            include_instructions: true,
+            max_context_tokens: None,
+            bundled_skills_enabled: false,
+            cloud_skill_enabled: false,
+            shadow_selection_enabled: true,
+        },
+        /*cloud_skills_available*/ false,
+    );
+    thread_state.set_capex_filter(Some((
+        std::collections::HashSet::from(["frontend".to_string()]),
+        std::collections::HashSet::new(),
+    )));
+    let host_catalog = SkillCatalog {
+        entries: vec![
+            crate::catalog::SkillCatalogEntry::new(
+                crate::catalog::SkillPackageId("/skills/frontend".to_string()),
+                crate::catalog::SkillAuthority::new(crate::catalog::SkillSourceKind::Host, "host"),
+                "frontend",
+                "Frontend skill",
+                crate::catalog::SkillResourceId::new("/skills/frontend/SKILL.md"),
+            )
+            .with_tags(vec!["frontend".to_string()]),
+            crate::catalog::SkillCatalogEntry::new(
+                crate::catalog::SkillPackageId("/skills/backend".to_string()),
+                crate::catalog::SkillAuthority::new(crate::catalog::SkillSourceKind::Host, "host"),
+                "backend",
+                "Backend skill",
+                crate::catalog::SkillResourceId::new("/skills/backend/SKILL.md"),
+            )
+            .with_tags(vec!["backend".to_string()]),
+        ],
+        warnings: Vec::new(),
+    };
+
+    let shadow_catalog = super::shadow_selection_catalog(
+        &thread_state,
+        &SkillCatalog::default(),
+        Some(&host_catalog),
+    );
+
+    assert!(
+        shadow_catalog
+            .entries
+            .iter()
+            .find(|entry| entry.name == "frontend")
+            .is_some_and(|entry| entry.is_model_visible())
+    );
+    assert!(
+        shadow_catalog
+            .entries
+            .iter()
+            .find(|entry| entry.name == "backend")
+            .is_some_and(|entry| !entry.is_model_visible())
+    );
+}

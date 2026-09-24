@@ -139,6 +139,31 @@ fn ordering_follows_render_policy() {
 }
 
 #[test]
+fn tag_filtered_catalog_renders_only_available_skills() {
+    let catalog = SkillCatalog {
+        entries: vec![
+            entry("frontend", "Frontend skill", None).with_tags(vec!["frontend".to_string()]),
+            entry("backend", "Backend skill", None).with_tags(vec!["backend".to_string()]),
+        ],
+        warnings: Vec::new(),
+    };
+    let active = std::collections::HashSet::from(["frontend".to_string()]);
+    let filtered = catalog.with_tag_availability(&active, &std::collections::HashSet::new());
+
+    let prompt = available_skills_fragment(
+        &filtered,
+        /*include_skills_usage_instructions*/ false,
+        SkillCatalogRenderPolicy::CoreCompatible,
+        SkillMetadataBudget::Characters(usize::MAX),
+    )
+    .expect("the matching skill should render")
+    .body();
+
+    assert!(prompt.contains("frontend"));
+    assert!(!prompt.contains("backend"));
+}
+
+#[test]
 fn description_selection_follows_render_policy() {
     let catalog = SkillCatalog {
         entries: vec![
