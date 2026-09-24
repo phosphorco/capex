@@ -144,8 +144,10 @@ selected repository's required checks and a final review against every row.
 
 ## Source inspection and compatibility boundary
 
-The intended source is now pinned to `openai/codex` main at
-`8e17909b27875b76b1e9a883a604ed24e969d609` on the local `capex` branch.
+The original implementation source was pinned to `openai/codex` main at
+`8e17909b27875b76b1e9a883a604ed24e969d609`. For the maintained fork's
+current upstream base and subsequent verification, see
+`CAPEX_UPSTREAM_LEARNINGS_LEDGER.md` and `capex-constraints.md`.
 The source inspection covered skill discovery/rendering/invocation, synchronous
 hook result parsing, session event persistence/replay, request construction,
 compaction, fork/clear, and child-agent initialization. Grant state lives in a

@@ -38,9 +38,12 @@ For ongoing source synchronization, version parity, and release checks, see
 `CAPEX_UPSTREAM_SYNC_WORKFLOW.md` and `CAPEX_UPSTREAM_LEARNINGS_LEDGER.md`.
 The original implementation and pinned binary proof were based on
 `8e17909b27875b76b1e9a883a604ed24e969d609`. On 2026-09-24 the fork's
-`main` was rebased onto upstream `16b20547f6b1feecbf41b89057d704ce1c293ab0`;
-that newer tree needs its own test results before the earlier proof can be
-claimed for it. The `codex-rs` workspace version `0.0.0` and a raw-binary
+primary `main` was rebased onto upstream
+`b19cebecc0169097bda7539af03c886e03bdeafe`. A newly built CLI at this base
+passed the pinned native 0.156.1 shared-session matrix; its hash, evidence
+directory and focused test results are recorded in the sync learnings ledger.
+This does not certify later native versions or untested fork boundaries. The
+`codex-rs` workspace version `0.0.0` and a raw-binary
 `--no-daemon` launcher are development artifacts, not a version-matched,
 fully packaged drop-in Codex release.
 
@@ -68,8 +71,8 @@ fully packaged drop-in Codex release.
 
 - Original implementation base: `openai/codex` main at
   `8e17909b27875b76b1e9a883a604ed24e969d609`. The first fork-primary
-  `main` rebase uses `16b20547f6b1feecbf41b89057d704ce1c293ab0`; consult
-  the sync ledger for later bases and verification status.
+  `main` publication uses `b19cebecc0169097bda7539af03c886e03bdeafe`;
+  consult the sync ledger for later bases and verification status.
 - Root `AGENTS.md` governs code and tests. Every new model-visible fragment
   must be a bounded `ContextualUserFragment` under `codex-rs/core/src/context`;
   no item may exceed 10K tokens and context must grow incrementally.

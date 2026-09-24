@@ -113,6 +113,25 @@ evidence with a broad claim of "Codex-compatible."
   comparison. Generated `.snap.new` files from the failed run were not
   accepted and were removed.
 
+### 2026-09-24 — final pre-publication upstream tip (`b19cebecc0`)
+
+- **Observed:** OpenAI `main` added `49862b62be` and `b19cebecc0` while the
+  first verification ran. Neither commit changed a file in the CapEx patch.
+  The three local CapEx commits rebased cleanly onto upstream
+  `b19cebecc0169097bda7539af03c886e03bdeafe`.
+- **Focused checks:** `just test -p codex-core -E 'test(capex)'` passed 23/23;
+  `cargo build -p codex-cli` passed. The resulting CLI SHA-256 is
+  `51cbb553103458ed9ffff696355e9f1e97db20022ac5ef30012e42438a216df2`.
+  The supporting-crate 677/677 result belongs to the immediately preceding
+  upstream tip; those two new commits did not touch the four supporting
+  crates. The broad `codex-core` failures remain unresolved and were not
+  rerun for this final tip.
+- **Cross-runtime evidence:** The pinned native 0.156.1 / final-tip CapEx
+  matrix passed the same serial shared-session paths, including two-way
+  compaction and the supported copied fork. Evidence is retained at
+  `/var/folders/59/3p94sjsj1vb3vd0czhyr554m0000gn/T/capex-binary-compat-7ix5d27s`.
+  This is a source-sync validation, **not** a package/version-parity release.
+
 ## New-entry template
 
 ```text
