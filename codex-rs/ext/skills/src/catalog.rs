@@ -1,6 +1,7 @@
 use codex_protocol::protocol::SkillScope;
 use codex_skills::SkillDependencies;
 use codex_utils_path_uri::PathUri;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Source authority that owns a skill package and must be used to read it.
@@ -176,6 +177,7 @@ pub struct SkillCatalogEntry {
     pub name: String,
     pub description: String,
     pub short_description: Option<String>,
+    pub tags: Vec<String>,
     pub main_prompt: SkillResourceId,
     pub display_path: Option<String>,
     pub canonical_skill_id: Option<String>,
@@ -203,6 +205,7 @@ impl SkillCatalogEntry {
             name: name.into(),
             description: description.into(),
             short_description: None,
+            tags: Vec::new(),
             main_prompt,
             display_path: None,
             canonical_skill_id: None,
@@ -219,6 +222,11 @@ impl SkillCatalogEntry {
 
     pub fn with_short_description(mut self, short_description: Option<String>) -> Self {
         self.short_description = short_description;
+        self
+    }
+
+    pub fn with_tags(mut self, tags: Vec<String>) -> Self {
+        self.tags = tags;
         self
     }
 
@@ -289,6 +297,27 @@ pub struct SkillCatalog {
 }
 
 impl SkillCatalog {
+    /// Returns a catalog containing only skills that match the active tags.
+    /// Excluded tags take precedence; untagged skills are unavailable when this
+    /// filter is applied. Call this on the unfiltered source catalog so later
+    /// grants can make additional skills available.
+    pub fn with_tag_availability(
+        &self,
+        active_tags: &HashSet<String>,
+        excluded_tags: &HashSet<String>,
+    ) -> Self {
+        let mut catalog = self.clone();
+        for entry in &mut catalog.entries {
+            let included = !entry.tags.is_empty()
+                && entry.tags.iter().any(|tag| active_tags.contains(tag))
+                && !entry.tags.iter().any(|tag| excluded_tags.contains(tag));
+            if !included {
+                entry.enabled = false;
+            }
+        }
+        catalog
+    }
+
     pub fn extend(&mut self, other: SkillCatalog) {
         for entry in other.entries {
             self.push_entry(entry);
@@ -350,5 +379,9 @@ impl std::fmt::Display for SkillProviderError {
 }
 
 impl std::error::Error for SkillProviderError {}
+
+#[cfg(test)]
+#[path = "catalog_tests.rs"]
+mod tests;
 
 pub type SkillProviderResult<T> = Result<T, SkillProviderError>;

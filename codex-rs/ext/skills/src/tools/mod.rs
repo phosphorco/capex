@@ -52,6 +52,10 @@ mod list;
 mod read;
 mod schema;
 
+#[cfg(test)]
+#[path = "tools_tests.rs"]
+mod tests;
+
 const SKILLS_NAMESPACE: &str = "skills";
 const MAX_HANDLE_BYTES: usize = 2_048;
 const MAX_SKILL_RESPONSE_BYTES: usize = 512 * 1024;
@@ -209,12 +213,13 @@ struct SkillToolContext {
 
 impl SkillToolContext {
     async fn catalog(&self, turn_id: &str, authority: SkillToolAuthoritySelector) -> SkillCatalog {
-        match authority {
+        let catalog = match authority {
             SkillToolAuthoritySelector::Cloud => {
                 if !self.cloud_available {
-                    return SkillCatalog::default();
+                    SkillCatalog::default()
+                } else {
+                    self.thread_state.cloud_catalog_snapshot()
                 }
-                self.thread_state.cloud_catalog_snapshot()
             }
             SkillToolAuthoritySelector::Executor => {
                 let Some(mut query) = self.executor_query.clone() else {
@@ -231,7 +236,8 @@ impl SkillToolContext {
                 }
                 catalog
             }
-        }
+        };
+        self.thread_state.filter_capex_catalog(&catalog)
     }
 }
 

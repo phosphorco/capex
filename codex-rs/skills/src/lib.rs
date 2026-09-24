@@ -39,9 +39,12 @@ pub use model::SkillToolDependency;
 pub use name_counts::build_skill_name_counts;
 pub use parser::ParsedSkillFrontmatter;
 pub use parser::SkillParseError;
+pub use parser::parse_capability_tags;
 pub use parser::parse_skill_frontmatter_metadata;
 pub use selection::ExplicitSkillLookup;
+pub use selection::ExplicitSkillMentionResult;
 pub use selection::collect_explicit_skill_mentions;
+pub use selection::collect_explicit_skill_mentions_with_availability;
 
 use codex_utils_absolute_path::AbsolutePathBuf;
 use include_dir::Dir;

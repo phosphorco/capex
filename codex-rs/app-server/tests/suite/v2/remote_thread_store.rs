@@ -390,6 +390,7 @@ async fn thread_delete_with_non_local_thread_store_does_not_create_local_persist
             multi_agent_version: None,
             history_mode: Default::default(),
             history_base: None,
+            forked_from_ordinal_exclusive: None,
             subagent_history_start_ordinal: None,
             initial_window_id: Uuid::now_v7().to_string(),
             runtime_workspace_roots: None,

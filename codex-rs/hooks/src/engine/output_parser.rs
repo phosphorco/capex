@@ -10,6 +10,7 @@ pub(crate) struct UniversalOutput {
 pub(crate) struct SessionStartOutput {
     pub universal: UniversalOutput,
     pub additional_context: Option<String>,
+    pub capability_grants: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +52,7 @@ pub(crate) struct UserPromptSubmitOutput {
     pub reason: Option<String>,
     pub invalid_block_reason: Option<String>,
     pub additional_context: Option<String>,
+    pub capability_grants: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -91,11 +93,15 @@ use crate::schema::SubagentStopCommandOutputWire;
 use crate::schema::UserPromptSubmitCommandOutputWire;
 
 pub(crate) fn parse_session_start(stdout: &str) -> Option<SessionStartOutput> {
-    let wire: SessionStartCommandOutputWire = parse_json(stdout)?;
+    let SessionStartCommandOutputWire {
+        universal,
+        capex,
+        hook_specific_output,
+    } = parse_json(stdout)?;
     Some(session_start_output(
-        wire.universal,
-        wire.hook_specific_output
-            .and_then(|output| output.additional_context),
+        universal,
+        hook_specific_output.and_then(|output| output.additional_context),
+        capex.map_or_else(Vec::new, |output| output.grant),
     ))
 }
 
@@ -105,16 +111,19 @@ pub(crate) fn parse_subagent_start(stdout: &str) -> Option<SessionStartOutput> {
         wire.universal,
         wire.hook_specific_output
             .and_then(|output| output.additional_context),
+        Vec::new(),
     ))
 }
 
 fn session_start_output(
     universal: HookUniversalOutputWire,
     additional_context: Option<String>,
+    capability_grants: Vec<String>,
 ) -> SessionStartOutput {
     SessionStartOutput {
         universal: UniversalOutput::from(universal),
         additional_context,
+        capability_grants,
     }
 }
 
@@ -264,10 +273,16 @@ pub(crate) fn parse_interrupt(stdout: &str) -> Option<InterruptOutput> {
 }
 
 pub(crate) fn parse_user_prompt_submit(stdout: &str) -> Option<UserPromptSubmitOutput> {
-    let wire: UserPromptSubmitCommandOutputWire = parse_json(stdout)?;
-    let should_block = matches!(wire.decision, Some(BlockDecisionWire::Block));
+    let UserPromptSubmitCommandOutputWire {
+        universal,
+        decision,
+        reason,
+        capex,
+        hook_specific_output,
+    } = parse_json(stdout)?;
+    let should_block = matches!(decision, Some(BlockDecisionWire::Block));
     let invalid_block_reason = if should_block
-        && match wire.reason.as_deref() {
+        && match reason.as_deref() {
             Some(reason) => reason.trim().is_empty(),
             None => true,
         } {
@@ -275,15 +290,14 @@ pub(crate) fn parse_user_prompt_submit(stdout: &str) -> Option<UserPromptSubmitO
     } else {
         None
     };
-    let additional_context = wire
-        .hook_specific_output
-        .and_then(|output| output.additional_context);
+    let additional_context = hook_specific_output.and_then(|output| output.additional_context);
     Some(UserPromptSubmitOutput {
-        universal: UniversalOutput::from(wire.universal),
+        universal: UniversalOutput::from(universal),
         should_block: should_block && invalid_block_reason.is_none(),
-        reason: wire.reason,
+        reason,
         invalid_block_reason,
         additional_context,
+        capability_grants: capex.map_or_else(Vec::new, |output| output.grant),
     })
 }
 
@@ -526,6 +540,8 @@ mod tests {
     use serde_json::json;
 
     use super::parse_permission_request;
+    use super::parse_session_start;
+    use super::parse_subagent_start;
     use super::parse_user_prompt_submit;
 
     #[test]
@@ -537,6 +553,8 @@ mod tests {
             r#"{"hookSpecificOutput":{"additionalContext":"missing event name"}}"#,
             r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","updatedInput":{}}}"#,
             r#"{"unexpectedField":true}"#,
+            r#"{"capex":{"grant":"frontend"}}"#,
+            r#"{"capex":{"grant":["frontend"],"unexpectedField":true}}"#,
             "{",
         ] {
             assert!(
@@ -544,6 +562,25 @@ mod tests {
                 "invalid structured output should fail: {stdout}",
             );
         }
+    }
+
+    #[test]
+    fn session_start_and_user_prompt_submit_parse_capex_grants() {
+        let session_start = parse_session_start(r#"{"capex":{"grant":["frontend","docs"]}}"#)
+            .expect("session start output should parse");
+        let user_prompt_submit = parse_user_prompt_submit(r#"{"capex":{"grant":["engineering"]}}"#)
+            .expect("user prompt submit output should parse");
+
+        assert_eq!(session_start.capability_grants, vec!["frontend", "docs"]);
+        assert_eq!(user_prompt_submit.capability_grants, vec!["engineering"]);
+    }
+
+    #[test]
+    fn capex_grants_are_rejected_for_other_hook_events() {
+        let stdout = r#"{"capex":{"grant":["frontend"]}}"#;
+
+        assert!(parse_permission_request(stdout).is_none());
+        assert!(parse_subagent_start(stdout).is_none());
     }
 
     #[test]

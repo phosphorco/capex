@@ -156,9 +156,18 @@ impl<'a> CatalogContext<'a> {
         );
 
         CatalogContributions {
-            executor,
-            cloud,
-            host,
+            executor: CatalogContribution {
+                catalog: self.thread_state.filter_capex_catalog(&executor.catalog),
+                status: executor.status,
+            },
+            cloud: CatalogContribution {
+                catalog: self.thread_state.filter_capex_catalog(&cloud.catalog),
+                status: cloud.status,
+            },
+            host: CatalogContribution {
+                catalog: self.thread_state.filter_capex_catalog(&host.catalog),
+                status: host.status,
+            },
         }
     }
 

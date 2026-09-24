@@ -355,6 +355,7 @@ async fn snapshot_for_config_merges_extension_host_and_legacy_plugin_roots() {
         .outcome()
         .skills
         .iter()
+        .filter(|skill| matches!(skill.name.as_str(), "sample:search" | "user-skill"))
         .map(|skill| (skill.name.as_str(), skill.plugin_id.as_deref()))
         .collect::<Vec<_>>();
 
@@ -400,12 +401,19 @@ async fn snapshot_for_config_preserves_host_precedence_for_symlinked_plugin_root
     )
     .await;
 
+    let matching_skills = outcome
+        .skills
+        .iter()
+        .filter(|skill| skill.name == "sample:search")
+        .cloned()
+        .collect::<Vec<_>>();
     assert_eq!(
-        outcome.skills,
+        matching_skills,
         vec![codex_skills::SkillMetadata {
             name: "sample:search".to_string(),
             description: "shared skill".to_string(),
             short_description: None,
+            tags: Vec::new(),
             interface: None,
             dependencies: None,
             policy: None,

@@ -277,6 +277,7 @@ fn create_thread_params(thread_id: ThreadId) -> CreateThreadParams {
         multi_agent_version: None,
         history_mode: ThreadHistoryMode::Legacy,
         history_base: None,
+        forked_from_ordinal_exclusive: None,
         subagent_history_start_ordinal: None,
         initial_window_id: uuid::Uuid::now_v7().to_string(),
         runtime_workspace_roots: None,

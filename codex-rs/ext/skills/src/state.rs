@@ -41,9 +41,15 @@ pub(crate) struct SkillsSessionState {
     pub(crate) extension_metrics: Option<Arc<dyn ExtensionMetrics>>,
 }
 
+struct CapexSkillFilter {
+    active: HashSet<String>,
+    excluded: HashSet<String>,
+}
+
 /// Thread-owned skill configuration and caches; consumers can only read catalog snapshots.
 pub struct SkillsThreadState {
     config: Mutex<SkillsExtensionConfig>,
+    capex_filter: Mutex<Option<CapexSkillFilter>>,
     cloud_skills_available: bool,
     skills_extension_state: Mutex<SkillsExtensionState>,
     shadow_selection_turn: Mutex<Option<ShadowSelectionTurn>>,
@@ -56,12 +62,34 @@ impl SkillsThreadState {
     pub(crate) fn new(config: SkillsExtensionConfig, cloud_skills_available: bool) -> Self {
         Self {
             config: Mutex::new(config),
+            capex_filter: Mutex::new(None),
             cloud_skills_available,
             skills_extension_state: Mutex::new(SkillsExtensionState::default()),
             shadow_selection_turn: Mutex::new(None),
             executor_read_snapshot: Mutex::new(None),
             recent_skill_invocations: Arc::new(RecentSkillInvocations::default()),
             shadow_task_context: Arc::new(ShadowTaskContext::default()),
+        }
+    }
+
+    /// Sets the active CapEx tag projection for this thread. `None` restores
+    /// ordinary skill discovery and invocation behavior.
+    pub fn set_capex_filter(&self, tags: Option<(HashSet<String>, HashSet<String>)>) {
+        *self
+            .capex_filter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            tags.map(|(active, excluded)| CapexSkillFilter { active, excluded });
+    }
+
+    pub(crate) fn filter_capex_catalog(&self, catalog: &SkillCatalog) -> SkillCatalog {
+        let filter = self
+            .capex_filter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match filter.as_ref() {
+            Some(filter) => catalog.with_tag_availability(&filter.active, &filter.excluded),
+            None => catalog.clone(),
         }
     }
 

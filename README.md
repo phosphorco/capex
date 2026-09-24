@@ -1,4 +1,19 @@
 <p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
+
+<!-- CAPEX NOTES START
+CapEx is a Codex fork that progressively reveals capabilities and matching skills
+as synchronous hooks determine what the session needs. Capabilities live in
+`.agents/capabilities/<name>/CAPABILITY.md`; skills opt into matching through
+`metadata.tags`. Enable selection with `CAPEX_CAPABILITY_MODE=1`, and let
+`SessionStart` or `UserPromptSubmit` hooks grant capabilities with a
+`{"capex":{"grant":["frontend"]}}` result. Grants and capability snapshots
+persist in a per-session sidecar, keeping Codex rollout JSONL compatible with
+native Codex. Grants accumulate for the session; automatic decay, revocation,
+and per-thread filtering in the app-server skills picker are outside v1. Shared
+storage interoperability was tested against pinned Codex CLI 0.156.1; future
+versions and all fork cutoffs are not yet covered.
+CAPEX NOTES END -->
+
 <p align="center">
   <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
 </p>

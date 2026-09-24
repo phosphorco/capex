@@ -1,6 +1,7 @@
 use pretty_assertions::assert_eq;
 
 use super::ParsedSkillFrontmatter;
+use super::parse_capability_tags;
 use super::parse_skill_frontmatter_metadata;
 
 #[test]
@@ -17,6 +18,7 @@ fn parses_repairs_and_sanitizes_frontmatter() {
             name: "deploy service".to_string(),
             description: "Build for AWS: ECS".to_string(),
             short_description: Some("Deploy safely".to_string()),
+            tags: Vec::new(),
         }
     );
 }
@@ -33,6 +35,7 @@ fn uses_default_name_and_requires_description() {
             name: "demo".to_string(),
             description: "Demo skill".to_string(),
             short_description: None,
+            tags: Vec::new(),
         }
     );
 
@@ -56,6 +59,7 @@ fn repairs_short_descriptions_containing_colons_and_apostrophes() {
             name: "short".to_string(),
             description: "Short skill".to_string(),
             short_description: Some("What's included: builds and tests".to_string()),
+            tags: Vec::new(),
         }
     );
 }
@@ -74,6 +78,7 @@ fn repairs_unrecognized_frontmatter_fields_that_need_quotes() {
             name: "unknown".to_string(),
             description: "Unknown fields".to_string(),
             short_description: None,
+            tags: Vec::new(),
         }
     );
 }
@@ -92,6 +97,7 @@ fn preserves_block_scalar_bodies_while_repairing_other_fields() {
             name: "block".to_string(),
             description: "Build for AWS: ECS".to_string(),
             short_description: None,
+            tags: Vec::new(),
         }
     );
 }
@@ -114,6 +120,28 @@ fn preserves_overlong_descriptions_and_short_descriptions() {
             name: "long".to_string(),
             description,
             short_description: Some(short_description),
+            tags: Vec::new(),
         }
     );
+}
+
+#[test]
+fn parses_and_normalizes_metadata_tags() {
+    let parsed = parse_skill_frontmatter_metadata(
+        "---\nname: tagged\ndescription: Tagged skill\nmetadata:\n  tags: [frontend, ' backend ', frontend, '']\n---\n",
+        || "fallback".to_string(),
+    )
+    .expect("valid frontmatter");
+
+    assert_eq!(parsed.tags, vec!["frontend", "backend"]);
+}
+
+#[test]
+fn parses_capability_tags_without_skill_metadata() {
+    let tags = parse_capability_tags(
+        "---\ntags: [engineering, ' frontend ', engineering, '']\n---\nCapability guidance.\n",
+    )
+    .expect("valid capability frontmatter");
+
+    assert_eq!(tags, vec!["engineering", "frontend"]);
 }

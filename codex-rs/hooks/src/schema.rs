@@ -389,7 +389,16 @@ pub(crate) struct SessionStartCommandOutputWire {
     #[serde(flatten)]
     pub universal: HookUniversalOutputWire,
     #[serde(default)]
+    pub capex: Option<CapexHookOutputWire>,
+    #[serde(default)]
     pub hook_specific_output: Option<SessionStartHookSpecificOutputWire>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CapexHookOutputWire {
+    pub grant: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -434,6 +443,8 @@ pub(crate) struct UserPromptSubmitCommandOutputWire {
     pub decision: Option<BlockDecisionWire>,
     #[serde(default)]
     pub reason: Option<String>,
+    #[serde(default)]
+    pub capex: Option<CapexHookOutputWire>,
     #[serde(default)]
     pub hook_specific_output: Option<UserPromptSubmitHookSpecificOutputWire>,
 }

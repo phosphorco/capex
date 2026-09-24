@@ -288,6 +288,7 @@ async fn create_paginated_thread(store: &LocalThreadStore, thread_id: ThreadId) 
             multi_agent_version: None,
             history_mode: ThreadHistoryMode::Paginated,
             history_base: None,
+            forked_from_ordinal_exclusive: None,
             subagent_history_start_ordinal: None,
             initial_window_id: "window-1".to_string(),
             runtime_workspace_roots: Some(vec![store.config.codex_home.join("workspace").abs()]),

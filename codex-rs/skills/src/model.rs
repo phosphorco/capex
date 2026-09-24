@@ -9,6 +9,7 @@ pub struct SkillMetadata {
     pub name: String,
     pub description: String,
     pub short_description: Option<String>,
+    pub tags: Vec<String>,
     pub interface: Option<SkillInterface>,
     pub dependencies: Option<SkillDependencies>,
     pub policy: Option<SkillPolicy>,
@@ -42,6 +43,7 @@ pub struct EnvironmentSkillMetadata {
     pub name: String,
     pub description: String,
     pub short_description: Option<String>,
+    pub tags: Vec<String>,
     pub dependencies: Option<SkillDependencies>,
     pub policy: Option<SkillPolicy>,
 }

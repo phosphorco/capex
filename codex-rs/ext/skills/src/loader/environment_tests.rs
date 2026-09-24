@@ -30,7 +30,7 @@ async fn direct_environment_loader_preserves_plugin_dependencies_and_product_pol
     .expect("manifest");
     fs::write(
         skill_dir.join("SKILL.md"),
-        "---\nname: deploy\ndescription: Deploy the service.\n---\n",
+        "---\nname: deploy\ndescription: Deploy the service.\nmetadata:\n  tags: [engineering, deploy]\n---\n",
     )
     .expect("skill");
     fs::write(
@@ -62,6 +62,7 @@ policy:
             name: "demo-plugin:deploy".to_string(),
             description: "Deploy the service.".to_string(),
             short_description: None,
+            tags: vec!["engineering".to_string(), "deploy".to_string()],
             dependencies: Some(SkillDependencies {
                 tools: vec![SkillToolDependency {
                     r#type: "mcp".to_string(),
@@ -100,7 +101,7 @@ async fn executor_bundle_parser_matches_direct_environment_loader() {
         (&nested_manifest, r#"{"name":"nested"}"#),
         (
             &deploy_skill,
-            "---\nname: deploy\ndescription: Deploy the service.\n---\n\nDeploy.\n",
+            "---\nname: deploy\ndescription: Deploy the service.\nmetadata:\n  tags: [engineering, deploy]\n---\n\nDeploy.\n",
         ),
         (
             &deploy_metadata,
@@ -155,7 +156,7 @@ async fn executor_bundle_parser_matches_direct_environment_loader() {
             .map(|skill| skill.instructions.as_str())
             .collect::<Vec<_>>(),
         vec![
-            "---\nname: deploy\ndescription: Deploy the service.\n---\n\nDeploy.\n",
+            "---\nname: deploy\ndescription: Deploy the service.\nmetadata:\n  tags: [engineering, deploy]\n---\n\nDeploy.\n",
             "---\nname: audit\ndescription: Audit the service.\n---\n\nAudit.\n",
         ]
     );

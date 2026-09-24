@@ -114,6 +114,7 @@ async fn curated_git_requirements_control_plugin_skills() -> Result<()> {
                     name: "sample:sample-search".to_string(),
                     description: "inspect sample data".to_string(),
                     short_description: None,
+                    tags: Vec::new(),
                     interface: None,
                     dependencies: None,
                     policy: None,

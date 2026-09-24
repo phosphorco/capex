@@ -134,6 +134,18 @@ fn render_prepared_catalog(
     }
 }
 
+fn shadow_selection_catalog(
+    thread_state: &SkillsThreadState,
+    catalog: &SkillCatalog,
+    host_catalog: Option<&SkillCatalog>,
+) -> SkillCatalog {
+    let mut shadow_catalog = catalog.clone();
+    if let Some(host_catalog) = host_catalog {
+        shadow_catalog.extend(host_catalog.clone());
+    }
+    thread_state.filter_capex_catalog(&shadow_catalog)
+}
+
 #[cfg(test)]
 #[path = "extension_tests.rs"]
 mod tests;
@@ -216,6 +228,7 @@ where
                     &thread_state,
                 )
                 .await;
+            let catalog = thread_state.filter_capex_catalog(&catalog);
             for warning in bounded_warnings(&catalog.warnings) {
                 self.emit_warning(thread_store.level_id(), /*turn_id*/ None, warning);
             }
@@ -393,16 +406,18 @@ where
                 .map(|executor_skills| executor_skills.0.clone())
                 .unwrap_or_default();
             catalog.extend(self.list_skills(query, &thread_state).await);
+            let catalog = thread_state.filter_capex_catalog(&catalog);
             for warning in bounded_warnings(&catalog.warnings) {
                 self.emit_warning(thread_store.level_id(), Some(&input.turn_id), warning);
             }
 
             let selected_entries = collect_explicit_skill_mentions(&input.user_input, &catalog);
             let shadow_selection_turn = if config.shadow_selection_enabled {
-                let mut shadow_catalog = catalog.clone();
-                if let Some(host_skills) = host_skills {
-                    shadow_catalog.extend(host_skills.0.clone());
-                }
+                let shadow_catalog = shadow_selection_catalog(
+                    &thread_state,
+                    &catalog,
+                    host_skills.as_ref().map(|host_skills| &host_skills.0),
+                );
                 let shadow_selected_entries =
                     collect_explicit_skill_mentions(&input.user_input, &shadow_catalog);
                 Some(self.shadow_selection.run(

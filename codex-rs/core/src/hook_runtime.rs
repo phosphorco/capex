@@ -59,6 +59,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 use tracing::instrument;
 
+use crate::context::CapexInstructions;
 use crate::context::ContextualUserFragment;
 use crate::context::HookAdditionalContext;
 use crate::environment_selection::TurnEnvironmentSnapshot;
@@ -76,6 +77,7 @@ use crate::turn_metadata::ExecutionMetadata;
 pub(crate) struct HookRuntimeOutcome {
     pub should_stop: bool,
     pub additional_contexts: Vec<String>,
+    pub capability_grants: Vec<String>,
 }
 
 pub(crate) enum PreToolUseHookResult {
@@ -95,12 +97,14 @@ impl From<SessionStartOutcome> for ContextInjectingHookOutcome {
             should_stop,
             stop_reason: _,
             additional_contexts,
+            capability_grants,
         } = value;
         Self {
             hook_events,
             outcome: HookRuntimeOutcome {
                 should_stop,
                 additional_contexts,
+                capability_grants,
             },
         }
     }
@@ -113,12 +117,14 @@ impl From<UserPromptSubmitOutcome> for ContextInjectingHookOutcome {
             should_stop,
             stop_reason: _,
             additional_contexts,
+            capability_grants,
         } = value;
         Self {
             hook_events,
             outcome: HookRuntimeOutcome {
                 should_stop,
                 additional_contexts,
+                capability_grants,
             },
         }
     }
@@ -130,6 +136,7 @@ pub(crate) async fn run_pending_session_start_hooks(
     turn_context: &Arc<TurnContext>,
 ) -> bool {
     while let Some(session_start_source) = sess.take_pending_session_start_source().await {
+        record_active_capabilities(sess, turn_context).await;
         // Spawned subagents can start fresh or fork their parent's history, so both
         // sources dispatch SubagentStart. Internal/system subagents skip start hooks.
         let target = match &turn_context.session_source {
@@ -705,10 +712,12 @@ pub(crate) async fn inspect_pending_input(
         TurnInput::ResponseItem(_) | TurnInput::FunctionCallOutput(_) => HookRuntimeOutcome {
             should_stop: false,
             additional_contexts: Vec::new(),
+            capability_grants: Vec::new(),
         },
         TurnInput::InterAgentCommunication(_) => HookRuntimeOutcome {
             should_stop: false,
             additional_contexts: Vec::new(),
+            capability_grants: Vec::new(),
         },
     }
 }
@@ -840,8 +849,83 @@ impl HookRuntimeOutcome {
         turn_context: &Arc<TurnContext>,
     ) -> bool {
         record_additional_contexts(sess, turn_context, self.additional_contexts).await;
+        apply_capability_grants(sess, turn_context, self.capability_grants).await;
 
         self.should_stop
+    }
+}
+
+pub(crate) async fn apply_capability_grants(
+    sess: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+    ids: Vec<String>,
+) {
+    let Some(capex) = sess
+        .services
+        .thread_extension_data
+        .get::<crate::capex::CapexRuntime>()
+    else {
+        return;
+    };
+    let mut newly_granted = Vec::new();
+    for id in ids {
+        match capex.grant(&id, &turn_context.sub_id) {
+            Ok(Some(snapshot)) => newly_granted.push(snapshot),
+            Ok(None) => {}
+            Err(error) => {
+                sess.send_event(
+                    turn_context,
+                    EventMsg::Warning(WarningEvent {
+                        message: format!("CapEx grant `{id}` ignored: {error}"),
+                    }),
+                )
+                .await;
+            }
+        }
+    }
+    if newly_granted.is_empty() {
+        return;
+    }
+    if let Some(skills) = sess
+        .services
+        .thread_extension_data
+        .get::<codex_skills_extension::SkillsThreadState>()
+    {
+        skills.set_capex_filter(Some(capex.skill_tags()));
+    }
+    record_capex_snapshots(sess, turn_context, newly_granted).await;
+}
+
+async fn record_active_capabilities(sess: &Arc<Session>, turn_context: &Arc<TurnContext>) {
+    if let Some(capex) = sess
+        .services
+        .thread_extension_data
+        .get::<crate::capex::CapexRuntime>()
+    {
+        record_capex_snapshots(sess, turn_context, capex.grants()).await;
+    }
+}
+
+async fn record_capex_snapshots(
+    sess: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+    snapshots: Vec<crate::capex_state::CapabilityGrantSnapshot>,
+) {
+    let history = sess.clone_history().await;
+    let messages: Vec<ResponseItem> = snapshots
+        .into_iter()
+        .filter(|snapshot| {
+            !history.raw_items().any(|item| {
+                crate::capex::is_capex_instruction(item, snapshot)
+                    || crate::capex::is_capex_instruction_text(item, snapshot)
+            })
+        })
+        .map(|snapshot| CapexInstructions::new(snapshot.id, snapshot.instructions))
+        .map(ContextualUserFragment::into)
+        .collect();
+    if !messages.is_empty() {
+        sess.record_conversation_items(turn_context, turn_context.model_info(), &messages)
+            .await;
     }
 }
 

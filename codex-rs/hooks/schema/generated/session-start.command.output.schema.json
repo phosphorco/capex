@@ -2,6 +2,21 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "CapexHookOutputWire": {
+      "additionalProperties": false,
+      "properties": {
+        "grant": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "grant"
+      ],
+      "type": "object"
+    },
     "SessionStartHookSpecificOutputWire": {
       "additionalProperties": false,
       "properties": {
@@ -21,6 +36,14 @@
     }
   },
   "properties": {
+    "capex": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/CapexHookOutputWire"
+        }
+      ],
+      "default": null
+    },
     "continue": {
       "default": true,
       "type": "boolean"

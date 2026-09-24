@@ -139,3 +139,7 @@ impl From<&SkillCatalogEntry> for SkillCatalogEntryKey {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "selection_tests.rs"]
+mod tests;
