@@ -14,6 +14,10 @@ native Codex. Grants accumulate for the session; automatic decay, revocation,
 and per-thread filtering in the app-server skills picker are outside v1. Shared
 storage interoperability was tested against pinned Codex CLI 0.156.1; future
 versions and all fork cutoffs are not yet covered.
+
+Maintainers: see the [upstream sync and release workflow](CAPEX_UPSTREAM_SYNC_WORKFLOW.md),
+the [learnings ledger](CAPEX_UPSTREAM_LEARNINGS_LEDGER.md), and the
+[compatibility constraints](capex-constraints.md).
 <!-- CAPEX NOTES END -->
 
 <p align="center">
