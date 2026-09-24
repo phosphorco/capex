@@ -131,6 +131,11 @@ evidence with a broad claim of "Codex-compatible."
   compaction and the supported copied fork. Evidence is retained at
   `/var/folders/59/3p94sjsj1vb3vd0czhyr554m0000gn/T/capex-binary-compat-7ix5d27s`.
   This is a source-sync validation, **not** a package/version-parity release.
+- **Publication:** `origin/main` was fast-forwarded from `869b5527cd` and
+  GitHub's default branch was changed from `capex` to `main`; local `main`
+  tracks `origin/main`. The old remote `capex` ref remains at `570953d542`
+  as historical work, not the maintained branch. No force push or upstream
+  write was used.
 
 ## New-entry template
 
